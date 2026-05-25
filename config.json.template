@@ -1,0 +1,23 @@
+{
+  "databasePath": "\\\\192.168.1.99\\d\\your_erp_folder\\stock.DBF",
+  "lowStockThreshold": 5,
+  "pushTimes": [
+    "08:30",
+    "17:00"
+  ],
+  "priorityProducts": [],
+  "bots": [
+    {
+      "name": "YOUR_BOT_NAME",
+      "token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+      "features": [
+        "query",
+        "history",
+        "take",
+        "push"
+      ],
+      "authorizedChats": []
+    }
+  ],
+  "apiToken": "YOUR_SECURE_API_TOKEN_HERE"
+}
