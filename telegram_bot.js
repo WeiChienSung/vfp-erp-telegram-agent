@@ -846,11 +846,21 @@ class TelegramBotInstance {
         // 處理管理後台網址指令 (僅限管理員機器人 BOT_1)
         if (text === '設定' || text.toLowerCase() === '/config' || text === '⚙️ 管理後台') {
             if (isSelf) {
+                const inlineKeyboard = {
+                    inline_keyboard: [
+                        [
+                            {
+                                "text": "🔗 點此開啟本機管理後台",
+                                "url": "http://lvh.me:3000/config"
+                            }
+                        ]
+                    ]
+                };
                 sendTelegramMessage(
                     this.token,
                     chatId,
-                    `🛠️ <b>ERP 隨身助手 - 本機管理後台：</b>\n\n請在安裝此程式的<b>主機電腦</b>上，使用瀏覽器開啟以下連結進行設定：\n🔗 <a href="http://lvh.me:3000/config">http://lvh.me:3000/config</a>\n\n<i>安全提示：為防範 Token 憑證與金鑰外洩，此設定網頁僅限在本機電腦打開，不支援手機或外網開啟。</i>`,
-                    myKeyboard
+                    `🛠️ <b>ERP 隨身助手 - 本機管理後台：</b>\n\n請在安裝此程式的<b>主機電腦</b>上點擊下方按鈕進行設定：\n\n<i>安全提示：為防範 Token 憑證與金鑰外洩，此設定網頁僅限在本機電腦打開，不支援手機或外網開啟。</i>`,
+                    inlineKeyboard
                 );
                 return;
             }
