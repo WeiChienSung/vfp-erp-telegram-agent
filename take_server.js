@@ -51,10 +51,97 @@ function loadConfig() {
     }
 }
 
+// 庫存預測記憶體快取
+let forecastCache = null;
+let forecastCacheTime = 0;
+const FORECAST_CACHE_MS = 5 * 60 * 1000; // 快取 5 分鐘
+let isCalculatingForecastBackground = false;
+
+// 背景自動重新整理快取
+function refreshForecastCacheBackground() {
+    if (isCalculatingForecastBackground) return;
+    isCalculatingForecastBackground = true;
+    console.log('[背景快取] 開始在背景重新計算庫存預測...');
+    
+    setImmediate(() => {
+        try {
+            const start = Date.now();
+            const result = calcForecastData();
+            forecastCache = result;
+            forecastCacheTime = Date.now();
+            console.log(`[背景快取] 計算完成。耗時 ${Date.now() - start} ms。活躍品項: ${result.meta.totalActive}`);
+        } catch (e) {
+            console.error('[背景快取] 計算失敗:', e.message);
+        } finally {
+            isCalculatingForecastBackground = false;
+        }
+    });
+}
+
+// 盤點上傳工作佇列，序列化寫入 DBF 避免並發鎖定衝突
+const uploadQueue = [];
+let isProcessingUpload = false;
+
+function processUploadQueue() {
+    if (isProcessingUpload || uploadQueue.length === 0) return;
+    
+    isProcessingUpload = true;
+    const task = uploadQueue.shift();
+    const { payload, res } = task;
+    
+    const uniqueId = crypto.randomBytes(8).toString('hex');
+    const tempJsonPath = path.join(__dirname, `temp_take_${uniqueId}.json`);
+    
+    try {
+        fs.writeFileSync(tempJsonPath, JSON.stringify(payload, null, 2), 'utf8');
+        const dbDir = path.dirname(config.databasePath);
+        const psScriptPath = path.join(__dirname, 'append_take.ps1');
+        
+        const ps = spawn('powershell.exe', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', psScriptPath,
+            '-JsonPath', tempJsonPath,
+            '-DbDir', dbDir
+        ]);
+
+        let psOutput = '';
+        ps.stdout.on('data', data => psOutput += data.toString());
+        ps.stderr.on('data', data => psOutput += data.toString());
+
+        ps.on('close', code => {
+            try { fs.unlinkSync(tempJsonPath); } catch(e) {}
+            isProcessingUpload = false;
+            
+            if (code === 0) {
+                console.log(`[系統] 盤點數據寫入成功 (佇列處理)。PS 輸出: ${psOutput.trim()}`);
+                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ success: true }));
+            } else {
+                console.error(`[系統] 盤點寫入 DBF 失敗 (佇列處理, Exit code ${code})。PS 輸出: ${psOutput}`);
+                res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ error: `寫入失敗 (Code ${code}): ${psOutput}` }));
+            }
+            
+            // 處理下一個任務
+            processUploadQueue();
+        });
+    } catch (err) {
+        try { fs.unlinkSync(tempJsonPath); } catch(e) {}
+        isProcessingUpload = false;
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: '排隊寫入失敗: ' + err.message }));
+        processUploadQueue();
+    }
+}
+
 // 監聽設定檔變更，自動重載
 fs.watchFile(CONFIG_PATH, (curr, prev) => {
     console.log('[系統] 偵測到設定檔 config.json 有變更，自動重新載入...');
     loadConfig();
+    forecastCache = null;
+    refreshForecastCacheBackground(); // 設定檔變更後立即觸發背景重算
 });
 
 // 2. 唯讀解析 Visual FoxPro DBF 檔案 (與 ERP 隨身查同步)
@@ -667,10 +754,20 @@ function startWebServer() {
                 res.end(JSON.stringify({ error: err.message }));
             }
         }
-        // API: 庫存預測報告
+        // API: 庫存預測報告 (使用背景重新整理的記憶體快取，極速 1ms 回傳，防止同步阻塞斷線)
         else if (pathname === '/api/forecast' && req.method === 'GET') {
             try {
+                if (forecastCache) {
+                    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                    res.end(JSON.stringify(forecastCache));
+                    return;
+                }
+                
+                console.log('[API /api/forecast] 快取尚未初始化，執行首次同步計算...');
                 const result = calcForecastData();
+                forecastCache = result;
+                forecastCacheTime = Date.now();
+                
                 res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify(result));
             } catch (err) {
@@ -734,44 +831,16 @@ function startWebServer() {
                 res.end(JSON.stringify({ error: err.message }));
             }
         }
-        // API: 上傳盤點結果
+        // API: 上傳盤點結果 (排入序列佇列，防範並發多 PowerShell 鎖定衝突)
         else if (pathname === '/api/upload' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', () => {
                 try {
                     const payload = JSON.parse(body);
-                    // 🛡️ 使用隨機檔名，防止並發上傳輸出互蓋
-                    const uniqueId = crypto.randomBytes(8).toString('hex');
-                    const tempJsonPath = path.join(__dirname, `temp_take_${uniqueId}.json`);
-                    fs.writeFileSync(tempJsonPath, JSON.stringify(payload, null, 2), 'utf8');
-
-                    const dbDir = path.dirname(config.databasePath);
-                    const psScriptPath = path.join(__dirname, 'append_take.ps1');
-                    const ps = spawn('powershell.exe', [
-                        '-ExecutionPolicy', 'Bypass',
-                        '-File', psScriptPath,
-                        '-JsonPath', tempJsonPath,
-                        '-DbDir', dbDir
-                    ]);
-
-                    let psOutput = '';
-                    ps.stdout.on('data', data => psOutput += data.toString());
-                    ps.stderr.on('data', data => psOutput += data.toString());
-
-                    ps.on('close', code => {
-                        try { fs.unlinkSync(tempJsonPath); } catch(e) {}
-
-                        if (code === 0) {
-                            console.log(`[系統] 盤點數據上傳成功。PS 輸出: ${psOutput.trim()}`);
-                            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-                            res.end(JSON.stringify({ success: true }));
-                        } else {
-                            console.error(`[系統] 盤點寫入 DBF 失敗 (Exit code ${code})。PS 輸出: ${psOutput}`);
-                            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-                            res.end(JSON.stringify({ error: `寫入失敗 (Code ${code}): ${psOutput}` }));
-                        }
-                    });
+                    // 將盤點寫入任務加入排隊佇列
+                    uploadQueue.push({ payload, res });
+                    processUploadQueue();
                 } catch (err) {
                     res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
                     res.end(JSON.stringify({ error: '解析 JSON 失敗: ' + err.message }));
@@ -786,6 +855,11 @@ function startWebServer() {
     server.listen(3000, '0.0.0.0', () => {
         console.log('[系統] 盤點與設定後台網頁伺服器已啟動，監聽 Port 3000。');
         console.log('[系統] 本機設定後台入口：http://localhost:3000/config');
+        
+        // 啟動時立即觸發一次背景快取重新整理，防止 HTTP 請求排隊時阻塞主線程
+        refreshForecastCacheBackground();
+        // 定期每 5 分鐘在背景更新快取
+        setInterval(refreshForecastCacheBackground, FORECAST_CACHE_MS);
     });
 }
 

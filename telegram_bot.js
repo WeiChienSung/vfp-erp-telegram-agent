@@ -877,6 +877,11 @@ function getBotKeyboard(botInstance) {
     };
 }
 
+// 限流防刷：記錄每個聊天室 (chatId) 最後發送查詢的時間
+const userLastQueryTime = {};
+// 庫存預測計算鎖，防止多人重複重算
+let isCalculatingForecast = false;
+
 // 4. 物件導向機器人執行類別 (TelegramBotInstance)
 class TelegramBotInstance {
     constructor(botConfig) {
@@ -1055,6 +1060,17 @@ class TelegramBotInstance {
                 sendTelegramMessage(this.token, chatId, `⚠️ 本機器人未啟用推播功能（push），無法使用庫存預測。`, myKeyboard);
                 return;
             }
+            if (isCalculatingForecast) {
+                sendTelegramMessage(
+                    this.token,
+                    chatId,
+                    `📊 <b>庫存預測正在計算中...</b>\n\n伺服器目前正在讀取 DBF 銷售明細，請在 10 秒後直接點擊上一次產生的儀表板連結。`,
+                    myKeyboard
+                );
+                return;
+            }
+
+            isCalculatingForecast = true;
             sendTelegramMessage(this.token, chatId, `⏳ <b>正在計算庫存預測...</b>\n正在從 ERP 分析最近 2 年銷售紀錄，請稍候約 10~30 秒...`, myKeyboard);
             try {
                 const { urgentCount, watchCount, totalActive } = generateForecastReport(false);
@@ -1095,6 +1111,8 @@ class TelegramBotInstance {
                 sendTelegramMessage(this.token, chatId, reply, inlineKeyboard);
             } catch (err) {
                 sendTelegramMessage(this.token, chatId, `⚠️ 庫存預測計算失敗：${err.message}`, myKeyboard);
+            } finally {
+                isCalculatingForecast = false;
             }
             return;
         }
@@ -1134,6 +1152,21 @@ class TelegramBotInstance {
             sendTelegramMessage(this.token, chatId, `⏳ <b>行動盤點助手目前未啟動。</b>\n請先啟動本機的「行動盤點助手」程式，或在幾秒鐘後重試。`, myKeyboard);
             return;
         }
+
+        // 🛡️ 限流防刷限制 (1.5 秒限制 1 次商品/歷史價格查詢)
+        const now = Date.now();
+        const lastQuery = userLastQueryTime[chatId] || 0;
+        if (now - lastQuery < 1500) {
+            console.log(`[防刷 - ${this.name}] 攔截來自 [${chatName}] (${chatId}) 的頻繁查詢`);
+            sendTelegramMessage(
+                this.token,
+                chatId,
+                `⚠️ <b>您的查詢頻率過快</b>\n\n系統正在為其他同仁服務，請稍候 1.5 秒後再試。`,
+                myKeyboard
+            );
+            return;
+        }
+        userLastQueryTime[chatId] = now;
 
         // 處理商品查詢
         const hasQuery = this.features.includes('query');

@@ -88,22 +88,30 @@ function Append-To-Take {
     $headerLength = [System.BitConverter]::ToInt16($headerBytes, 8)
     $recordLength = [System.BitConverter]::ToInt16($headerBytes, 10)
     
-    # Check if this date already exists in take.dbf
+    # Check if this date already exists in take.dbf (Optimize: scan only the last 100 records from the tail to avoid massive network transfer)
     $exists = $false
-    $recordBuf = New-Object byte[] $recordLength
-    
-    for ($r = 0; $r -lt $recordCount; $r++) {
-        $pos = $headerLength + ($r * $recordLength)
-        $stream.Seek($pos, [System.IO.SeekOrigin]::Begin) > $null
-        $stream.Read($recordBuf, 0, $recordLength) > $null
-        if ($recordBuf[0] -eq 0x2A) { continue } # deleted
+    if ($recordCount -gt 0) {
+        $scanCount = [Math]::Min(100, $recordCount)
+        $startIndex = $recordCount - $scanCount
         
-        # DAT starts at index 3 in record (DEL: 1, OK: 1, DEL: 1 -> DAT)
-        $recordDate = $big5.GetString($recordBuf, 3, 8).Trim()
-        if ($recordDate -eq $date) {
-            $exists = $true
-            Write-Host "Header for date $date already exists in take.dbf"
-            break
+        $totalRecordBytes = $scanCount * $recordLength
+        $allRecordsBuf = New-Object byte[] $totalRecordBytes
+        $startPos = $headerLength + ($startIndex * $recordLength)
+        $stream.Seek($startPos, [System.IO.SeekOrigin]::Begin) > $null
+        $readBytes = $stream.Read($allRecordsBuf, 0, $totalRecordBytes)
+        
+        for ($r = 0; $r -lt $scanCount; $r++) {
+            $offsetInBuf = $r * $recordLength
+            if ($offsetInBuf + $recordLength -gt $allRecordsBuf.Length) { break }
+            if ($allRecordsBuf[$offsetInBuf] -eq 0x2A) { continue } # deleted
+            
+            # DAT starts at index 3 in record (DEL: 1, OK: 1, DEL: 1 -> DAT)
+            $recordDate = $big5.GetString($allRecordsBuf, $offsetInBuf + 3, 8).Trim()
+            if ($recordDate -eq $date) {
+                $exists = $true
+                Write-Host "Header for date $date already exists in take.dbf"
+                break
+            }
         }
     }
     
@@ -210,23 +218,34 @@ function Append-To-Take1 {
     
     $currentCount = $recordCount
 
-    # 🛡️ 重複寫入防護：掃描現有明細，建立「日期+品號」組合的索引集，防止重複上傳導致庫存翻倍
+    # 🛡️ 重複寫入防護：局部掃描最近 5000 筆記錄 (大約 1MB)，避開在網路上傳輸數十萬筆歷史記錄 (130MB+) 的致命延遲
     $existingKeys = @{}
     $mnoField = $fields | Where-Object { $_.name -eq 'MNO' }
     $datField = $fields | Where-Object { $_.name -eq 'DAT' }
-    if ($mnoField -and $datField) {
-        $recordBuf = New-Object byte[] $recordLength
-        for ($r = 0; $r -lt $recordCount; $r++) {
-            $pos = $headerLength + ($r * $recordLength)
-            $stream.Seek($pos, [System.IO.SeekOrigin]::Begin) > $null
-            $stream.Read($recordBuf, 0, $recordLength) > $null
-            if ($recordBuf[0] -eq 0x2A) { continue } # deleted record
-            $existMno = $big5.GetString($recordBuf, $mnoField.offset, $mnoField.length).Trim()
-            $existDat = $big5.GetString($recordBuf, $datField.offset, $datField.length).Trim()
+    if ($mnoField -and $datField -and $recordCount -gt 0) {
+        $scanCount = [Math]::Min(5000, $recordCount)
+        $startIndex = $recordCount - $scanCount
+        
+        $totalRecordBytes = $scanCount * $recordLength
+        $allRecordsBuf = New-Object byte[] $totalRecordBytes
+        $startPos = $headerLength + ($startIndex * $recordLength)
+        $stream.Seek($startPos, [System.IO.SeekOrigin]::Begin) > $null
+        $readBytes = $stream.Read($allRecordsBuf, 0, $totalRecordBytes)
+        
+        for ($r = 0; $r -lt $scanCount; $r++) {
+            $offsetInBuf = $r * $recordLength
+            if ($offsetInBuf + $recordLength -gt $allRecordsBuf.Length) { break }
+            if ($allRecordsBuf[$offsetInBuf] -eq 0x2A) { continue } # deleted record
+            
+            $existMno = $big5.GetString($allRecordsBuf, $offsetInBuf + $mnoField.offset, $mnoField.length).Trim()
+            $existDat = $big5.GetString($allRecordsBuf, $offsetInBuf + $datField.offset, $datField.length).Trim()
             $key = "$existDat|$existMno"
+            if ($existingKeys -eq $null) {
+                $existingKeys = @{}
+            }
             $existingKeys[$key] = $true
         }
-        Write-Host "take1.dbf existing key count: $($existingKeys.Count)"
+        Write-Host "take1.dbf existing key count in scan window: $($existingKeys.Count) (scanned $scanCount records from end)"
     }
 
     $skippedCount = 0
@@ -314,27 +333,14 @@ if (-not (Test-Path $take1Path)) {
     exit 1
 }
 
-# 同時持有兩個檔案的寫入鎖，消除 TOCTOU 競爭條件
-# 只有當兩個檔案都能成功開啟時，才繼續進行寫入
-$takeStream = $null
-$take1Stream = $null
-
 try {
-    $takeStream = [System.IO.File]::Open($takePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
-    $take1Stream = [System.IO.File]::Open($take1Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    Append-To-Take $takePath $dateStr $timeStr
+    Append-To-Take1 $take1Path $dateStr $timeStr $items
 } catch {
-    if ($takeStream) { $takeStream.Close() }
-    if ($take1Stream) { $take1Stream.Close() }
-    Write-Error "預檢失敗：資料庫檔案正被 ERP 獨佔使用中。錯誤: $($_.Exception.Message)"
+    Write-Error "寫入 DBF 失敗。錯誤: $($_.Exception.Message)`nStack: $($_.ScriptStackTrace)"
     exit 1
 }
 
-# 關閉鎖定串流，讓函數內部重新開啟進行正式讀寫
-$takeStream.Close()
-$take1Stream.Close()
 
-# If both are openable, proceed
-Append-To-Take $takePath $dateStr $timeStr
-Append-To-Take1 $take1Path $dateStr $timeStr $items
 
 Write-Host "DBF Append completed successfully!"
