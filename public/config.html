@@ -33,6 +33,38 @@
                     </div>
                 </div>
 
+                <h2>📊 智慧庫存預測設定</h2>
+                <div class="form-group">
+                    <label for="lowStockLeadTimeDays">補貨週期（工作天）</label>
+                    <div class="slider-container">
+                        <input type="range" id="lowStockLeadTimeDays" min="1" max="30" value="7">
+                        <span id="leadTimeDaysValue" class="badge">7</span>
+                    </div>
+                    <small class="field-hint">低水位 = 日均銷量 × 此天數。建議設 7（一般國內廠商）或 14~21（進口品）。</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="lowStockFallback">新品預設安全水位（無銷售紀錄時使用）</label>
+                    <div class="slider-container">
+                        <input type="range" id="lowStockFallback" min="0" max="50" value="5">
+                        <span id="fallbackValue" class="badge">5</span>
+                    </div>
+                    <small class="field-hint">庫存 > 0 且 ≤ 此值的新品才會發出緊急預警（設為 0 代表新品完全不預警）。</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="lowStockMin2YearSales">活躍商品銷量門檻（過去 2 年最低出貨量）</label>
+                    <div class="slider-container">
+                        <input type="range" id="lowStockMin2YearSales" min="0" max="50" value="5">
+                        <span id="min2YearSalesValue" class="badge">5</span>
+                    </div>
+                    <small class="field-hint">2 年內總出貨量低於此值的商品視為冷門品，不納入智慧預警（設為 0 代表全部商品都納入）。</small>
+                </div>
+
+                <div class="forecast-link-bar">
+                    <a href="/forecast" target="_blank" class="btn btn-forecast">📊 開啟庫存預測儀表板</a>
+                </div>
+
                 <h2>⏰ 每日缺貨定時推播排程</h2>
                 <div class="push-schedule-section">
                     <div class="add-time-bar">
@@ -48,8 +80,16 @@
             <!-- 右側：主力商品設定 (搜尋與管理) -->
             <section class="card">
                 <h2>🔴 主力警報商品管理 (Priority Products)</h2>
-                <p class="description">只有列在清單中的商品才會觸發日常低庫存提醒。其餘商品僅在剛好變為 0 (斷貨) 的瞬間觸發，防止訊息爆量。</p>
+                <p class="description">列在此清單的商品，在庫存預測儀表板中會標示 ⭐，方便快速識別。</p>
                 
+                <!-- 批次貼上品號 -->
+                <div class="form-group">
+                    <label for="priorityBulkInput">批次新增主力商品品號（用逗號或換行分隔）</label>
+                    <textarea id="priorityBulkInput" rows="3" placeholder="例:\nA001\nA002, B003\nC100"
+                        style="width:100%;font-family:monospace;font-size:0.9rem;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.05);color:inherit;resize:vertical;"></textarea>
+                    <button type="button" class="btn btn-secondary" onclick="bulkAddPriority()" style="margin-top:8px">➕ 批次新增</button>
+                </div>
+
                 <div class="search-bar">
                     <input type="text" id="productSearchInput" placeholder="搜尋商品名稱、編號或條碼 (例: 酒精)">
                     <button type="button" class="btn btn-secondary" onclick="searchProducts()">🔍 搜尋</button>

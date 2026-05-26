@@ -546,3 +546,41 @@ footer {
         grid-template-columns: 1fr;
     }
 }
+
+/* ── 新增：補貨預測相關樣式 ── */
+.field-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    opacity: 0.8;
+    line-height: 1.4;
+}
+
+.forecast-link-bar {
+    display: flex;
+    justify-content: flex-end;
+    margin: 12px 0 4px;
+}
+
+.btn-forecast {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 18px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(52,211,153,0.18), rgba(16,185,129,0.12));
+    border: 1px solid rgba(52,211,153,0.4);
+    color: #34d399;
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.btn-forecast:hover {
+    background: linear-gradient(135deg, rgba(52,211,153,0.28), rgba(16,185,129,0.22));
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(52,211,153,0.25);
+}

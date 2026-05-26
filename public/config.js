@@ -3,6 +3,9 @@
 let localConfig = {
     databasePath: "",
     lowStockThreshold: 5,
+    lowStockLeadTimeDays: 7,
+    lowStockFallback: 5,
+    lowStockMin2YearSales: 5,
     pushTimes: [],
     priorityProducts: [],
     bots: []
@@ -14,12 +17,18 @@ let searchResultsCache = [];
 
 // 初始化載入
 document.addEventListener("DOMContentLoaded", () => {
-    // 滑桿數值顯示連動
-    const slider = document.getElementById("lowStockThreshold");
-    const valDisplay = document.getElementById("lowStockValue");
-    slider.addEventListener("input", (e) => {
-        valDisplay.textContent = e.target.value;
-    });
+    // 滑桿數値顯示連動
+    function bindSlider(sliderId, displayId) {
+        const slider  = document.getElementById(sliderId);
+        const display = document.getElementById(displayId);
+        if (slider && display) {
+            slider.addEventListener("input", (e) => { display.textContent = e.target.value; });
+        }
+    }
+    bindSlider('lowStockThreshold',   'lowStockValue');
+    bindSlider('lowStockLeadTimeDays', 'leadTimeDaysValue');
+    bindSlider('lowStockFallback',     'fallbackValue');
+    bindSlider('lowStockMin2YearSales','min2YearSalesValue');
 
     loadConfigFromServer();
 });
@@ -47,8 +56,17 @@ async function loadConfigFromServer() {
 // 將設定數據渲染到畫面上
 function renderConfig() {
     document.getElementById("databasePath").value = localConfig.databasePath || "";
-    document.getElementById("lowStockThreshold").value = localConfig.lowStockThreshold || 5;
-    document.getElementById("lowStockValue").textContent = localConfig.lowStockThreshold || 5;
+
+    function setSlider(id, displayId, val, def) {
+        const el = document.getElementById(id);
+        const dl = document.getElementById(displayId);
+        if (el) el.value = val !== undefined ? val : def;
+        if (dl) dl.textContent = val !== undefined ? val : def;
+    }
+    setSlider('lowStockThreshold',    'lowStockValue',       localConfig.lowStockThreshold,    5);
+    setSlider('lowStockLeadTimeDays', 'leadTimeDaysValue',   localConfig.lowStockLeadTimeDays, 7);
+    setSlider('lowStockFallback',     'fallbackValue',       localConfig.lowStockFallback,     5);
+    setSlider('lowStockMin2YearSales','min2YearSalesValue',  localConfig.lowStockMin2YearSales,5);
 
     renderPushTimes();
     renderBots();
@@ -226,6 +244,32 @@ function addPriorityProduct(no) {
             searchProducts();
         }
     }
+}
+
+// 批次貼上品號新增主力商品
+function bulkAddPriority() {
+    const raw = (document.getElementById('priorityBulkInput').value || '').trim();
+    if (!raw) { showStatus('請先輸入品號', 'error'); return; }
+
+    const nos = raw
+        .split(/[,\n\r\uff0c]+/)
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+    let added = 0;
+    nos.forEach(no => {
+        if (!localConfig.priorityProducts.includes(no)) {
+            localConfig.priorityProducts.push(no);
+            if (!priorityProductsDetails.some(p => p.NO === no)) {
+                priorityProductsDetails.push({ NO: no, NAME: no, UNIT: '', INVQT: 0 });
+            }
+            added++;
+        }
+    });
+
+    document.getElementById('priorityBulkInput').value = '';
+    renderPriorityProducts();
+    showStatus(`已新增 ${added} 個品號（重複跳過），請記得儲存設定。`, 'success');
 }
 
 // ==================================================
@@ -412,6 +456,9 @@ async function saveConfiguration() {
 
     localConfig.databasePath = path;
     localConfig.lowStockThreshold = threshold;
+    localConfig.lowStockLeadTimeDays  = parseInt(document.getElementById('lowStockLeadTimeDays').value)  || 7;
+    localConfig.lowStockFallback      = parseInt(document.getElementById('lowStockFallback').value)      || 5;
+    localConfig.lowStockMin2YearSales = parseInt(document.getElementById('lowStockMin2YearSales').value) || 5;
 
     // 驗證機器人 Token 填寫
     for (let i = 0; i < localConfig.bots.length; i++) {

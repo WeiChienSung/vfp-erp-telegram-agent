@@ -34,6 +34,11 @@ function loadConfig() {
             config = JSON.parse(raw);
             console.log(`[系統] 設定檔載入成功。已註冊機器人數量: ${config.bots ? config.bots.length : 0}`);
             
+            // 設定缺少項目補預設值
+            if (config.lowStockLeadTimeDays === undefined)  config.lowStockLeadTimeDays = 7;
+            if (config.lowStockFallback === undefined)       config.lowStockFallback = 5;
+            if (config.lowStockMin2YearSales === undefined)  config.lowStockMin2YearSales = 5;
+            
             // 檢查是否已設定 API 金鑰，若無則生成並寫入
             if (!config.apiToken) {
                 config.apiToken = crypto.randomBytes(16).toString('hex');
@@ -250,6 +255,151 @@ function sendTelegramMessage(token, chatId, text) {
 }
 
 // =============================================
+// 庫存預測計算引擎（供 /api/forecast 使用）
+// =============================================
+function queryDbfSimple(dbPath, filterFn, fieldsNeeded) {
+    // 精簡版 DBF 掃描器（供 take_server.js 內部使用，不依賴 queryDbfOptimized）
+    if (!fs.existsSync(dbPath)) return;
+    const buf = fs.readFileSync(dbPath);
+    const recordCount = buf.readInt32LE(4);
+    const headerLen   = buf.readInt16LE(8);
+    const recordLen   = buf.readInt16LE(10);
+
+    const fields = [];
+    let off = 32;
+    let recOff = 1;
+    while (off < headerLen - 1) {
+        const fb = buf.subarray(off, off + 32);
+        if (fb[0] === 0x0D) break;
+        let ne = 0;
+        while (ne < 11 && fb[ne] !== 0) ne++;
+        const name = fb.subarray(0, ne).toString('ascii').trim();
+        const type = String.fromCharCode(fb[11]);
+        const len  = fb[16];
+        if (!fieldsNeeded || fieldsNeeded.includes(name)) {
+            fields.push({ name, type, len, off: recOff });
+        }
+        recOff += len;
+        off += 32;
+    }
+
+    const big5 = new TextDecoder('big5');
+    for (let r = 0; r < recordCount; r++) {
+        const pos = headerLen + r * recordLen;
+        if (pos + recordLen > buf.length) break;
+        if (buf[pos] === 0x2A) continue;
+        const rb = buf.subarray(pos, pos + recordLen);
+        const record = {};
+        for (const f of fields) {
+            const raw = rb.subarray(f.off, f.off + f.len);
+            if (f.type === 'N') {
+                record[f.name] = parseFloat(raw.toString('ascii').trim()) || 0;
+            } else {
+                let end = raw.length;
+                while (end > 0 && (raw[end-1] === 0x20 || raw[end-1] === 0x00)) end--;
+                record[f.name] = big5.decode(raw.subarray(0, end));
+            }
+        }
+        filterFn(record);
+    }
+}
+
+function calcForecastData() {
+    const leadDays   = config.lowStockLeadTimeDays || 7;
+    const fallback   = config.lowStockFallback !== undefined ? config.lowStockFallback : 5;
+    const minSales   = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
+    const dbDir      = path.dirname(config.databasePath);
+    const ougo1Path  = path.join(dbDir, 'ougo1.dbf');
+
+    // 1. 計算 2 年銷售地圖
+    const salesMap = {};
+    if (fs.existsSync(ougo1Path)) {
+        const cutoff = new Date();
+        cutoff.setFullYear(cutoff.getFullYear() - 2);
+        const cutoffStr = cutoff.getFullYear().toString() +
+            String(cutoff.getMonth() + 1).padStart(2, '0') +
+            String(cutoff.getDate()).padStart(2, '0');
+
+        queryDbfSimple(ougo1Path, (rec) => {
+            const dat = (rec.DAT || '').trim();
+            if (dat.length >= 8 && dat >= cutoffStr) {
+                const mno = (rec.MNO || '').trim();
+                const qut = parseFloat(rec.QUT) || 0;
+                if (mno && qut > 0) salesMap[mno] = (salesMap[mno] || 0) + qut;
+            }
+        }, ['DAT', 'MNO', 'QUT']);
+    }
+
+    // 2. 讀取庫存資料並計算各商品狀態
+    const allStock = readStockDb(config.databasePath);
+    const WORK_DAYS_MONTH = 22;
+    const MONTHS = 24;
+
+    const items = [];
+    for (const item of allStock) {
+        const name = item.NAME || '';
+        if (name.includes('停產') || name.includes('停用') || name.includes('停售')) continue;
+
+        const stock = item.INVQT || 0;
+        const totalQut = salesMap[item.NO];
+
+        let level, daysLeft = null, avgMonthly = null, avgDailyWork = null, lowWater = null;
+
+        if (totalQut && totalQut >= minSales) {
+            avgMonthly   = Math.round((totalQut / MONTHS) * 10) / 10;
+            avgDailyWork = Math.round((avgMonthly / WORK_DAYS_MONTH) * 10) / 10;
+            lowWater     = Math.max(Math.ceil(avgDailyWork * leadDays), 1);
+            daysLeft     = avgDailyWork > 0 ? Math.round(stock / avgDailyWork) : Infinity;
+
+            if (stock <= lowWater) {
+                level = daysLeft <= leadDays ? 'urgent' : 'watch';
+            } else {
+                level = 'healthy';
+            }
+        } else {
+            // 無銷售紀錄：庫存 > 0 且 <= fallback 才算緊急，0 庫存不算
+            if (stock > 0 && stock <= fallback) {
+                level = 'urgent';
+            } else {
+                level = 'healthy';
+            }
+        }
+
+        items.push({
+            no:         (item.NO   || '').trim(),
+            name:       (item.NAME || '').trim(),
+            unit:       (item.UNIT || '').trim(),
+            bno:        (item.BNO  || '').trim(),
+            stock,
+            avgMonthly,
+            avgDailyWork,
+            lowWater,
+            daysLeft:   daysLeft === Infinity ? null : daysLeft,
+            level
+        });
+    }
+
+    const urgent  = items.filter(i => i.level === 'urgent').length;
+    const watch   = items.filter(i => i.level === 'watch').length;
+    const healthy = items.filter(i => i.level === 'healthy').length;
+
+    return {
+        items,
+        meta: {
+            totalActive: items.length,
+            urgentCount: urgent,
+            watchCount:  watch,
+            healthyCount: healthy,
+            leadDays,
+            minSales,
+            fallback,
+            priorityProducts: config.priorityProducts || [],
+            generatedAt: new Date().toISOString()
+        }
+    };
+}
+
+// =============================================
 // HTTP 網頁伺服器與 Localtunnel 安全通道
 // =============================================
 let tunnelUrl = '';
@@ -460,6 +610,14 @@ function startWebServer() {
         } else if (pathname === '/config.js') {
             serveStaticFile(res, path.join(__dirname, 'public', 'config.js'), 'application/javascript; charset=utf-8');
         }
+        // 庫存預測儀表板路由
+        else if (pathname === '/forecast' || pathname === '/forecast.html') {
+            serveStaticFile(res, path.join(__dirname, 'public', 'forecast.html'), 'text/html; charset=utf-8');
+        } else if (pathname === '/forecast.css') {
+            serveStaticFile(res, path.join(__dirname, 'public', 'forecast.css'), 'text/css; charset=utf-8');
+        } else if (pathname === '/forecast.js') {
+            serveStaticFile(res, path.join(__dirname, 'public', 'forecast.js'), 'application/javascript; charset=utf-8');
+        }
         // API: 讀取設定檔 (限本機)
         else if (pathname === '/api/config' && req.method === 'GET') {
             try {
@@ -504,6 +662,18 @@ function startWebServer() {
                 res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify(suppliers));
             } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        }
+        // API: 庫存預測報告
+        else if (pathname === '/api/forecast' && req.method === 'GET') {
+            try {
+                const result = calcForecastData();
+                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify(result));
+            } catch (err) {
+                console.error('[API /api/forecast] 計算失敗:', err.message);
                 res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify({ error: err.message }));
             }

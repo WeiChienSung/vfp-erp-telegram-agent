@@ -28,6 +28,7 @@ let config = {
     lowStockThreshold: 5,
     lowStockLeadTimeDays: 7,
     lowStockFallback: 5,
+    lowStockMin2YearSales: 5,   // 過去 2 年總銷量需大於此值才納入預警（過濾死品與極低頻商品）
     pushTimes: [],
     priorityProducts: [],
     bots: []
@@ -43,6 +44,7 @@ function loadConfig() {
             config.lowStockThreshold = parsed.lowStockThreshold !== undefined ? parsed.lowStockThreshold : config.lowStockThreshold;
             config.lowStockLeadTimeDays = parsed.lowStockLeadTimeDays || 7;
             config.lowStockFallback = parsed.lowStockFallback !== undefined ? parsed.lowStockFallback : 5;
+            config.lowStockMin2YearSales = parsed.lowStockMin2YearSales !== undefined ? parsed.lowStockMin2YearSales : 5;
             config.pushTimes = parsed.pushTimes || config.pushTimes;
             config.priorityProducts = parsed.priorityProducts || [];
             config.bots = parsed.bots || [];
@@ -64,6 +66,7 @@ function saveConfig() {
             lowStockThreshold: config.lowStockThreshold,
             lowStockLeadTimeDays: config.lowStockLeadTimeDays,
             lowStockFallback: config.lowStockFallback,
+            lowStockMin2YearSales: config.lowStockMin2YearSales,
             pushTimes: config.pushTimes,
             priorityProducts: config.priorityProducts,
             bots: config.bots
@@ -709,9 +712,13 @@ function calcDynamicThresholds(forceRefresh = false) {
         const WORK_DAYS_MONTH = 22;  // 每月工作天
         const leadDays = config.lowStockLeadTimeDays || 7;
         const MONTHS = 24;
+        const minSales = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
 
         const thresholds = {};
         for (const [mno, totalQut] of Object.entries(salesMap)) {
+            // 過濾極低頻商品：2 年總銷量未達門檻，不納入預警
+            if (totalQut < minSales) continue;
+
             const avgMonthly = totalQut / MONTHS;
             const avgDailyWork = avgMonthly / WORK_DAYS_MONTH;
             const lowWater = Math.max(Math.ceil(avgDailyWork * leadDays), 1);
@@ -725,7 +732,7 @@ function calcDynamicThresholds(forceRefresh = false) {
 
         _dynamicThresholdCache = thresholds;
         _dynamicThresholdCacheTime = now;
-        console.log(`[動態低水位] 計算完成，共 ${Object.keys(thresholds).length} 個商品有銷售紀錄 (截止日: ${cutoffStr})`);
+        console.log(`[動態低水位] 計算完成，共 ${Object.keys(thresholds).length} 個活躍商品 (截止日: ${cutoffStr}，門檻: ${minSales})`);
         return thresholds;
     } catch (err) {
         console.error('[動態低水位] 計算失敗:', err.message);
@@ -769,8 +776,8 @@ function generateForecastReport(includeHealthy = false) {
                 healthy.push(entry);
             }
         } else {
-            // 無銷售紀錄，用固定閾值
-            if (stock <= fallback) {
+            // 無銷售紀錄的新品：只有庫存 > 0 且低於 fallback 才預警（排除死品庫存 = 0）
+            if (stock > 0 && stock <= fallback) {
                 urgent.push({ item, th: null, daysLeft: null });
             }
         }
@@ -1049,18 +1056,42 @@ class TelegramBotInstance {
             }
             sendTelegramMessage(this.token, chatId, `⏳ <b>正在計算庫存預測...</b>\n正在從 ERP 分析最近 2 年銷售紀錄，請稍候約 10~30 秒...`, myKeyboard);
             try {
-                const { report, urgentCount, watchCount, totalActive } = generateForecastReport(false);
+                const { urgentCount, watchCount, totalActive } = generateForecastReport(false);
                 const leadDays = config.lowStockLeadTimeDays || 7;
-                let reply = `📊 <b>智慧庫存預測報告</b>\n`;
-                reply += `共 ${totalActive} 項活動商品 | 補貨週期：${leadDays} 工作天\n`;
-                reply += `🔴 緊急：${urgentCount} 項 | 🟡 關注：${watchCount} 項\n`;
+                const minSales = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
+
+                let reply = `📊 <b>智慧庫存預測報告（摘要）</b>\n`;
+                reply += `共 <b>${totalActive}</b> 項活躍商品 | 補貨週期：${leadDays} 工作天\n`;
+                reply += `<i>（已自動過濾 2 年銷量 &lt;${minSales} 件之不活躍商品及零庫存死品）</i>\n`;
                 reply += `-----------------------------------\n\n`;
-                if (report) {
-                    reply += report;
+                if (urgentCount === 0 && watchCount === 0) {
+                    reply += `✅ <b>太棒了！目前庫存全部充裕。</b>\n所有活躍商品庫存均高於 ${leadDays} 工作天安全水位。`;
                 } else {
-                    reply += `✅ <b>太棒了！</b>\n目前所有商品庫存均充裕（皆高於 ${leadDays} 工作天安全庫存）。`;
+                    reply += `🔴 <b>緊急補貨（不足 ${leadDays} 工作天存量）：${urgentCount} 項</b>\n`;
+                    reply += `🟡 <b>建議關注（存量 ${leadDays}~30 天）：${watchCount} 項</b>\n\n`;
+                    reply += `👉 點選下方按鈕開啟完整儀表板\n可搜尋品名、依廠商篩選、或匯出 CSV 報表。`;
                 }
-                sendTelegramMessage(this.token, chatId, reply, myKeyboard);
+
+                // 嘗試從 active_url.txt 取得 Localtunnel 外網 URL，產生儀表板連結
+                let dashboardUrl = 'http://localhost:3000/forecast';
+                try {
+                    if (fs.existsSync(ACTIVE_URL_PATH)) {
+                        const rawUrl = fs.readFileSync(ACTIVE_URL_PATH, 'utf8').trim();
+                        if (rawUrl) {
+                            const baseUrl = rawUrl.replace(/\/+$/, '');
+                            const apiToken = require('./config.json').apiToken || '';
+                            dashboardUrl = `${baseUrl}/forecast${apiToken ? '?token=' + apiToken : ''}`;
+                        }
+                    }
+                } catch (e) { /* 讀取失敗時使用本機 URL */ }
+
+                const inlineKeyboard = {
+                    inline_keyboard: [[
+                        { text: '📊 開啟完整庫存預測儀表板', url: dashboardUrl }
+                    ]]
+                };
+
+                sendTelegramMessage(this.token, chatId, reply, inlineKeyboard);
             } catch (err) {
                 sendTelegramMessage(this.token, chatId, `⚠️ 庫存預測計算失敗：${err.message}`, myKeyboard);
             }
