@@ -810,6 +810,8 @@ class TelegramBotInstance {
         const text = update.message.text.trim();
         const chatName = update.message.chat.title || update.message.chat.username || update.message.chat.first_name || '未知用戶';
 
+        const isSelf = this.name === 'BOT_1';
+
         // 動態決定使用自訂鍵盤
         const myKeyboard = getBotKeyboard(this);
 
