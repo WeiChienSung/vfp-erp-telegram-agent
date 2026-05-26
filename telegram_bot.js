@@ -90,7 +90,9 @@ function normalizeText(str) {
         .replace(/医/g, '醫')
         .replace(/药/g, '藥')
         .replace(/针/g, '針')
-        .replace(/纸/g, '紙');
+        .replace(/纸/g, '紙')
+        .replace(/寸/g, '吋')
+        .replace(/尺/g, '呎');
 }
 
 function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThreshold = 5) {
