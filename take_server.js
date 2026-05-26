@@ -161,7 +161,7 @@ function readStockDb(dbPath, keyword = null) {
             // 搜尋鍵包含：分詞、緊湊、品號、條碼
             const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
             
-            // 3. 將使用者的關鍵字做智慧拆分（支援中英數無空格混合輸入，如 3m1吋膚）
+            // 3. 將使用者的關鍵字做智慧拆分與搜尋權重排序
             let cleanQuery = normalizeText(keyword.trim());
             let initialParts = cleanQuery
                 .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
@@ -170,28 +170,48 @@ function readStockDb(dbPath, keyword = null) {
             
             let queryTokens = [];
             for (const part of initialParts) {
-                const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
-                let match;
-                while ((match = regex.exec(part)) !== null) {
-                    queryTokens.push(match[0]);
-                }
-                
-                // 若為純中文且長度大於 1，保留完整詞彙以維持精確度 (如 "酒精")
                 const hasChinese = /[\u4e00-\u9fa5]/.test(part);
                 const hasAlphanumeric = /[a-z0-9]/.test(part);
-                if (hasChinese && !hasAlphanumeric && part.length > 1) {
+                
+                if (hasChinese && !hasAlphanumeric) {
+                    // 純中文 (如 "酒精", "針頭") -> 保留完整詞彙
                     queryTokens.push(part);
+                } else {
+                    // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 拆分中英數
+                    const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
+                    let match;
+                    while ((match = regex.exec(part)) !== null) {
+                        queryTokens.push(match[0]);
+                    }
                 }
             }
             queryTokens = Array.from(new Set(queryTokens));
             
-            const matchesAll = queryTokens.every(token => searchKey.includes(token));
-            if (matchesAll) {
+            let score = 0;
+            const compactQuery = cleanQuery.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】]/g, '');
+            
+            // 優先級 1：緊湊字串完全匹配 (如 "3m1吋膚" -> "3m通氣紙膠膚色1吋") -> 滿分 100
+            if (nameCompact.includes(compactQuery) || normNo.includes(compactQuery) || normBno.includes(compactQuery) || normBno1.includes(compactQuery)) {
+                score = 100;
+            } else if (queryTokens.length > 0) {
+                // 優先級 2：分詞 AND 匹配 -> 分數 10
+                const matchesAll = queryTokens.every(token => searchKey.includes(token));
+                if (matchesAll) {
+                    score = 10;
+                }
+            }
+            
+            if (score > 0) {
+                record._score = score;
                 results.push(record);
             }
         } else {
             results.push(record);
         }
+    }
+    
+    if (keyword) {
+        results.sort((a, b) => b._score - a._score);
     }
     
     return results;

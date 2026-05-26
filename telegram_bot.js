@@ -194,7 +194,7 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
             // 搜尋鍵包含：分詞、緊湊、品號、條碼
             const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
             
-            // 3. 將使用者的關鍵字做智慧拆分（支援中英數無空格混合輸入，如 3m1吋膚）
+            // 3. 將使用者的關鍵字做智慧拆分與搜尋權重排序
             let cleanQuery = normalizeText(keyword.trim());
             let initialParts = cleanQuery
                 .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
@@ -203,28 +203,48 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
             
             let queryTokens = [];
             for (const part of initialParts) {
-                const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
-                let match;
-                while ((match = regex.exec(part)) !== null) {
-                    queryTokens.push(match[0]);
-                }
-                
-                // 若為純中文且長度大於 1，保留完整詞彙以維持精確度 (如 "酒精")
                 const hasChinese = /[\u4e00-\u9fa5]/.test(part);
                 const hasAlphanumeric = /[a-z0-9]/.test(part);
-                if (hasChinese && !hasAlphanumeric && part.length > 1) {
+                
+                if (hasChinese && !hasAlphanumeric) {
+                    // 純中文 (如 "酒精", "針頭") -> 保留完整詞彙
                     queryTokens.push(part);
+                } else {
+                    // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 拆分中英數
+                    const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
+                    let match;
+                    while ((match = regex.exec(part)) !== null) {
+                        queryTokens.push(match[0]);
+                    }
                 }
             }
             queryTokens = Array.from(new Set(queryTokens));
             
-            const matchesAll = queryTokens.every(token => searchKey.includes(token));
-            if (matchesAll) {
+            let score = 0;
+            const compactQuery = cleanQuery.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】]/g, '');
+            
+            // 優先級 1：緊湊字串完全匹配 (如 "3m1吋膚" -> "3m通氣紙膠膚色1吋") -> 滿分 100
+            if (nameCompact.includes(compactQuery) || normNo.includes(compactQuery) || normBno.includes(compactQuery) || normBno1.includes(compactQuery)) {
+                score = 100;
+            } else if (queryTokens.length > 0) {
+                // 優先級 2：分詞 AND 匹配 -> 分數 10
+                const matchesAll = queryTokens.every(token => searchKey.includes(token));
+                if (matchesAll) {
+                    score = 10;
+                }
+            }
+            
+            if (score > 0) {
+                record._score = score;
                 results.push(record);
             }
         } else {
             results.push(record);
         }
+    }
+    
+    if (keyword) {
+        results.sort((a, b) => b._score - a._score);
     }
     
     return results;
@@ -494,7 +514,9 @@ function parseCustomerProductQuery(text) {
             }, { limit: 10, fieldsToExtract: ['NO', 'NAME', 'NAME1'] });
 
             // 若匹配數大於 3 筆，代表此關鍵字為「藥局」、「公司」等通用後綴，不視為客戶
+            let multipleCustomers = null;
             if (customerMatches.length > 3) {
+                multipleCustomers = customerMatches.map(c => c.NAME1 || c.NAME);
                 customerMatches = [];
             }
         } catch (e) {
@@ -513,7 +535,8 @@ function parseCustomerProductQuery(text) {
             word,
             norm,
             customerMatches,
-            productMatches
+            productMatches,
+            hadMultipleCustomers: multipleCustomers
         };
     });
 
@@ -537,6 +560,14 @@ function parseCustomerProductQuery(text) {
     }
 
     if (bestCustomerIdx === -1) {
+        const multiMatchWord = wordAnalyses.find(a => a.hadMultipleCustomers);
+        if (multiMatchWord) {
+            return {
+                suggestMoreSpecificCustomer: true,
+                customerWord: multiMatchWord.word,
+                matchedNames: multiMatchWord.hadMultipleCustomers
+            };
+        }
         return null;
     }
 
@@ -866,8 +897,12 @@ class TelegramBotInstance {
 
         // 攔截並判斷是否為「客戶專屬歷史售價查詢」
         const historyQuery = parseCustomerProductQuery(keyword);
+        let customerTip = '';
         if (historyQuery) {
-            if (!hasHistory) {
+            if (historyQuery.suggestMoreSpecificCustomer) {
+                const namesStr = historyQuery.matchedNames.slice(0, 3).map(n => n.replace(/\*+$/, '')).join('、') + (historyQuery.matchedNames.length > 3 ? '等' : '');
+                customerTip = `\n\n💡 <b>提示</b>：關鍵字「${historyQuery.customerWord}」符合多位客戶（如：${namesStr}）。若想查詢該客戶售價歷史，請輸入更完整的客戶名稱。`;
+            } else if (!hasHistory) {
                 console.log(`[查詢 - ${this.name}] 偵測到歷史售價查詢，但本機器人未啟用 'history' 功能，降級為一般查詢。`);
             } else {
                 const { customerRecord, productKeywords } = historyQuery;
@@ -933,7 +968,11 @@ class TelegramBotInstance {
             const searchResults = readStockDb(config.databasePath, keyword, false);
             console.log(`[查詢 - ${this.name}] 關鍵字 "${keyword}" 查得 ${searchResults.length} 筆`);
             if (searchResults.length === 0) {
-                sendTelegramMessage(this.token, chatId, `❌ 查無符合關鍵字「<b>${keyword}</b>」的商品，請嘗試其他關鍵字。`, myKeyboard);
+                let errReply = `❌ 查無符合關鍵字「<b>${keyword}</b>」的商品，請嘗試其他關鍵字。`;
+                if (customerTip) {
+                    errReply += customerTip;
+                }
+                sendTelegramMessage(this.token, chatId, errReply, myKeyboard);
                 return;
             }
 
@@ -948,6 +987,9 @@ class TelegramBotInstance {
 
             if (searchResults.length > 12) {
                 reply += `<i>...還有更多商品，請輸入更精確的關鍵字縮小範圍.</i>`;
+            }
+            if (customerTip) {
+                reply += customerTip;
             }
 
             sendTelegramMessage(this.token, chatId, reply, myKeyboard);
