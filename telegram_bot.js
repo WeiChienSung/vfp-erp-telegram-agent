@@ -476,6 +476,8 @@ function queryDbfInMemory(dbPath, filterFn, options = {}) {
     return results;
 }
 
+const COMMON_SUFFIXES = new Set(['藥局', '診所', '公司', '醫院', '藥房', '護理之家', '衛生所', '牙醫', '眼科', '中醫', '婦產科', '耳鼻喉科', '小兒科']);
+
 function parseCustomerProductQuery(text) {
     const words = text.split(/[\s　]+/).filter(w => w.length >= 1);
     if (words.length < 2) return null;
@@ -492,35 +494,38 @@ function parseCustomerProductQuery(text) {
     const wordAnalyses = words.map(word => {
         const norm = normalizeText(word);
         const isPureNumber = /^\d+$/.test(word);
+        const isGenericSuffix = COMMON_SUFFIXES.has(norm);
         
         // Search in CUST.DBF
         let customerMatches = [];
-        try {
-            customerMatches = queryDbfOptimized(custDbPath, (record) => {
-                const normNo = normalizeText(record.NO);
-                const normName = normalizeText(record.NAME);
-                const normName1 = normalizeText(record.NAME1);
-                
-                if (isPureNumber) {
-                    return normNo === norm;
-                } else {
-                    if (word.length === 1) {
-                        // 單字搜尋只允許精確匹配簡稱或代號，防止「膚」、「藥」等字誤判
-                        return normNo === norm || normName1 === norm;
+        let multipleCustomers = null;
+        if (!isGenericSuffix) {
+            try {
+                customerMatches = queryDbfOptimized(custDbPath, (record) => {
+                    const normNo = normalizeText(record.NO);
+                    const normName = normalizeText(record.NAME);
+                    const normName1 = normalizeText(record.NAME1);
+                    
+                    if (isPureNumber) {
+                        return normNo === norm;
                     } else {
-                        return normNo.includes(norm) || normName.includes(norm) || normName1.includes(norm);
+                        if (word.length === 1) {
+                            // 單字搜尋只允許精確匹配簡稱或代號，防止「膚」、「藥」等字誤判
+                            return normNo === norm || normName1 === norm;
+                        } else {
+                            return normNo.includes(norm) || normName.includes(norm) || normName1.includes(norm);
+                        }
                     }
-                }
-            }, { limit: 10, fieldsToExtract: ['NO', 'NAME', 'NAME1'] });
+                }, { limit: 10, fieldsToExtract: ['NO', 'NAME', 'NAME1'] });
 
-            // 若匹配數大於 3 筆，代表此關鍵字為「藥局」、「公司」等通用後綴，不視為客戶
-            let multipleCustomers = null;
-            if (customerMatches.length > 3) {
-                multipleCustomers = customerMatches.map(c => c.NAME1 || c.NAME);
-                customerMatches = [];
+                // 若匹配數大於 3 筆，代表此關鍵字為「藥局」、「公司」等通用後綴，不視為客戶
+                if (customerMatches.length > 3) {
+                    multipleCustomers = customerMatches.map(c => c.NAME1 || c.NAME);
+                    customerMatches = [];
+                }
+            } catch (e) {
+                console.error('[分類器] 查詢 CUST.DBF 失敗:', e.message);
             }
-        } catch (e) {
-            console.error('[分類器] 查詢 CUST.DBF 失敗:', e.message);
         }
 
         // Search in stock.DBF
