@@ -194,12 +194,29 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
             // 搜尋鍵包含：分詞、緊湊、品號、條碼
             const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
             
-            // 3. 將使用者的關鍵字做相同符號拆分
+            // 3. 將使用者的關鍵字做智慧拆分（支援中英數無空格混合輸入，如 3m1吋膚）
             let cleanQuery = normalizeText(keyword.trim());
-            let queryTokens = cleanQuery
+            let initialParts = cleanQuery
                 .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
                 .split(/[\s　]+/)
                 .filter(t => t.length > 0);
+            
+            let queryTokens = [];
+            for (const part of initialParts) {
+                const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
+                let match;
+                while ((match = regex.exec(part)) !== null) {
+                    queryTokens.push(match[0]);
+                }
+                
+                // 若為純中文且長度大於 1，保留完整詞彙以維持精確度 (如 "酒精")
+                const hasChinese = /[\u4e00-\u9fa5]/.test(part);
+                const hasAlphanumeric = /[a-z0-9]/.test(part);
+                if (hasChinese && !hasAlphanumeric && part.length > 1) {
+                    queryTokens.push(part);
+                }
+            }
+            queryTokens = Array.from(new Set(queryTokens));
             
             const matchesAll = queryTokens.every(token => searchKey.includes(token));
             if (matchesAll) {
