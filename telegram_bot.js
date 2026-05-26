@@ -758,6 +758,7 @@ function generateForecastReport(includeHealthy = false) {
 
     for (const item of activeItems) {
         const stock = item.INVQT || 0;
+        if (stock < 0) continue; // 排除負庫存（ERP 資料異常，如未入帳退貨）
         const th = thresholds[item.NO];
 
         if (th) {

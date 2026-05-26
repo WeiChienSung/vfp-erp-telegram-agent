@@ -341,6 +341,7 @@ function calcForecastData() {
         if (name.includes('停產') || name.includes('停用') || name.includes('停售')) continue;
 
         const stock = item.INVQT || 0;
+        if (stock < 0) continue; // 排除負庫存（ERP 資料異常，如未入帳退貨）
         const totalQut = salesMap[item.NO];
 
         let level, daysLeft = null, avgMonthly = null, avgDailyWork = null, lowWater = null;
