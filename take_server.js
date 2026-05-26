@@ -2,6 +2,7 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -35,9 +36,9 @@ function loadConfig() {
             
             // 檢查是否已設定 API 金鑰，若無則生成並寫入
             if (!config.apiToken) {
-                config.apiToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+                config.apiToken = crypto.randomBytes(16).toString('hex');
                 saveConfig();
-                console.log(`[系統] 偵測到未設定 API 金鑰，已自動生成安全鎖金鑰。`);
+                console.log(`[系統] 偵測到未設定 API 金鑰，已自動生成密碼學安全鎖金鑰。`);
             }
         }
     } catch (e) {
@@ -178,7 +179,7 @@ function readStockDb(dbPath, keyword = null) {
                     queryTokens.push(part);
                 } else {
                     // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 拆分中英數
-                    const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
+                    const regex = /[a-z]+|[0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/g;
                     let match;
                     while ((match = regex.exec(part)) !== null) {
                         queryTokens.push(match[0]);
@@ -238,6 +239,10 @@ function sendTelegramMessage(token, chatId, text) {
     };
 
     const req = https.request(options);
+    req.on('timeout', () => {
+        req.destroy();
+        console.error('[Telegram] 發送超時，已主動銷毀 Socket 連線');
+    });
     req.on('error', (e) => console.error(`[Telegram 推送錯誤]:`, e.message));
     req.write(postData);
     req.end();
@@ -567,11 +572,13 @@ function startWebServer() {
                     const tempJsonPath = path.join(__dirname, 'temp_take.json');
                     fs.writeFileSync(tempJsonPath, JSON.stringify(payload, null, 2), 'utf8');
 
+                    const dbDir = path.dirname(config.databasePath);
                     const psScriptPath = path.join(__dirname, 'append_take.ps1');
                     const ps = spawn('powershell.exe', [
                         '-ExecutionPolicy', 'Bypass',
                         '-File', psScriptPath,
-                        '-JsonPath', tempJsonPath
+                        '-JsonPath', tempJsonPath,
+                        '-DbDir', dbDir
                     ]);
 
                     let psOutput = '';

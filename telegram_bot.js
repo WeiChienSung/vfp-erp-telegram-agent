@@ -211,7 +211,7 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
                     queryTokens.push(part);
                 } else {
                     // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 拆分中英數
-                    const regex = /[a-z]+|[0-9]+|[\u4e00-\u9fa5]/g;
+                    const regex = /[a-z]+|[0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/g;
                     let match;
                     while ((match = regex.exec(part)) !== null) {
                         queryTokens.push(match[0]);
@@ -1197,7 +1197,7 @@ function triggerLowStockPush() {
         }
 
         for (const bot of pushBots) {
-            const myKeyboard = bot.name === 'BOT_1' ? ADMIN_KEYBOARD : USER_KEYBOARD;
+            const myKeyboard = getBotKeyboard(bot);
             for (const chatId of bot.authorizedChats) {
                 sendTelegramMessage(bot.token, chatId, reply, myKeyboard);
             }
@@ -1206,7 +1206,7 @@ function triggerLowStockPush() {
         console.error('[排程推播錯誤]', err.message);
         const errMsg = `⚠️ <b>庫存排程推報錯誤</b>：\n無法讀取 ERP 資料庫檔，可能資料庫正被獨佔備份或鎖定中。\n(原因: ${err.message})`;
         for (const bot of pushBots) {
-            const myKeyboard = bot.name === 'BOT_1' ? ADMIN_KEYBOARD : USER_KEYBOARD;
+            const myKeyboard = getBotKeyboard(bot);
             for (const chatId of bot.authorizedChats) {
                 sendTelegramMessage(bot.token, chatId, errMsg, myKeyboard);
             }

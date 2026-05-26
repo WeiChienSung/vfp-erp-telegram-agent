@@ -1,7 +1,8 @@
 # PowerShell script to safely append a record to take.dbf and take1.dbf
 
 param (
-    [string]$JsonPath
+    [string]$JsonPath,
+    [string]$DbDir
 )
 
 # Load JSON data
@@ -268,7 +269,41 @@ function Append-To-Take1 {
 }
 
 # Run the appends
-Append-To-Take "Z:\nmedi\take.dbf" $dateStr $timeStr
-Append-To-Take1 "Z:\nmedi\take1.dbf" $dateStr $timeStr $items
+if (-not $DbDir) {
+    $DbDir = "Z:\nmedi"
+}
+
+$takePath = Join-Path $DbDir "take.dbf"
+$take1Path = Join-Path $DbDir "take1.dbf"
+
+if (-not (Test-Path $takePath)) {
+    Write-Error "Database not found: $takePath"
+    exit 1
+}
+if (-not (Test-Path $take1Path)) {
+    Write-Error "Database not found: $take1Path"
+    exit 1
+}
+
+# Pre-check locks (try opening both files for ReadWrite share ReadWrite)
+try {
+    $testTake = [System.IO.File]::Open($takePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    $testTake.Close()
+} catch {
+    Write-Error "Cannot open/lock take.dbf: $($_.Exception.Message)"
+    exit 1
+}
+
+try {
+    $testTake1 = [System.IO.File]::Open($take1Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    $testTake1.Close()
+} catch {
+    Write-Error "Cannot open/lock take1.dbf: $($_.Exception.Message)"
+    exit 1
+}
+
+# If both are openable, proceed
+Append-To-Take $takePath $dateStr $timeStr
+Append-To-Take1 $take1Path $dateStr $timeStr $items
 
 Write-Host "DBF Append completed successfully!"
