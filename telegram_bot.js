@@ -82,6 +82,8 @@ function setupConfigWatcher() {
 function normalizeText(str) {
     if (!str) return '';
     return str.toLowerCase()
+        // 全形英數轉半形
+        .replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
         .replace(/溼/g, '濕')
         .replace(/臺/g, '台')
         .replace(/綿/g, '棉')
@@ -177,42 +179,29 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
                 results.push(record);
             }
         } else if (keyword) {
-            let normalizedKeyword = normalizeText(keyword.trim())
-                .replace(/([\u4e00-\u9fa5])([^\u4e00-\u9fa5\s　])/g, '$1 $2')
-                .replace(/([^\u4e00-\u9fa5\s　])([\u4e00-\u9fa5])/g, '$1 $2');
-
-            // 常用醫用品牌與關鍵字字典，用於自動拆分中文字詞 (AND 搜尋)
-            const COMMON_WORDS = [
-                "華新", "中衛", "勤達", "佳合", "好貼", "卡好", "優生", "喜多", "貝瑞克", 
-                "舒美", "康乃馨", "成威", "康盟", "中興", "博朗", "歐姆龍", "羅氏", "泰爾茂", 
-                "百略", "福爾", "魚躍", "yasco", "3m",
-                "大白", "紙膠", "口罩", "酒精", "拔罐", "針灸", "棉棒", "紗布", "繃帶", 
-                "手套", "針頭", "針灸針", "生理食鹽水", "生理", "食鹽水", "凡士林", "血糖", 
-                "奶瓶", "奶嘴", "熱水袋", "冰袋", "輪椅", "拐杖", "便器椅", "洗澡椅", 
-                "護膝", "護肘", "護腕", "護腰", "網狀", "彈性袜", "彈性襪", "化工", "玻璃", 
-                "檢診", "彈性"
-            ];
-
-            for (const word of COMMON_WORDS) {
-                if (normalizedKeyword.includes(word)) {
-                    normalizedKeyword = normalizedKeyword.split(word).join(' ' + word + ' ');
-                }
-            }
-
-            const queryKeywords = normalizedKeyword.split(/[\s　]+/).filter(Boolean);
+            // 1. 去除建檔/調價日期後綴 (YY.MM.DD 或 YYY.MM.DD)
+            const nameClean = nameStr.replace(/\b\d{2,3}\.\d{2}\.\d{2}\b/g, '');
+            
+            // 2. 建立此商品的「分詞版」與「緊湊版」搜尋鍵
+            const normName = normalizeText(nameClean);
+            const nameSpaced = normName.replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ');
+            const nameCompact = normName.replace(/\s+/g, '');
             
             const normNo = normalizeText(record['NO']);
-            const normName = normalizeText(nameStr);
             const normBno = normalizeText(record['BNO']);
             const normBno1 = normalizeText(record['BNO1']);
-
-            const matchesAll = queryKeywords.every(kw => {
-                const matchesNo = normNo.includes(kw);
-                const matchesName = normName.includes(kw);
-                const matchesBarcode = normBno.includes(kw) || normBno1.includes(kw);
-                return matchesNo || matchesName || matchesBarcode;
-            });
-
+            
+            // 搜尋鍵包含：分詞、緊湊、品號、條碼
+            const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
+            
+            // 3. 將使用者的關鍵字做相同符號拆分
+            let cleanQuery = normalizeText(keyword.trim());
+            let queryTokens = cleanQuery
+                .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
+                .split(/[\s　]+/)
+                .filter(t => t.length > 0);
+            
+            const matchesAll = queryTokens.every(token => searchKey.includes(token));
             if (matchesAll) {
                 results.push(record);
             }
