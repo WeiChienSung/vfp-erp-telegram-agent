@@ -837,27 +837,33 @@ function formatProductInfo(item) {
 
 // 動態產生機器人自訂鍵盤 (依功能與權限)
 function getBotKeyboard(botInstance) {
-    const row = [];
+    const row1 = [];
+    const row2 = [];
     
     // 只有在啟用 'take' (盤點) 功能時才顯示開始盤點按鈕
     if (botInstance.features && botInstance.features.includes('take')) {
-        row.push({"text": "📋 開始盤點"});
+        row1.push({"text": "📋 開始盤點"});
     }
     
-    // 只有 BOT_1 (管理員機器人) 才顯示管理後台按鈕
+    // 只有 BOT_1 (管理員機器人) 才顯示管理後台與庫存預測按鈕
     if (botInstance.name === 'BOT_1') {
-        row.push({"text": "⚙️ 管理後台"});
+        row1.push({"text": "⚙️ 管理後台"});
+        // 若有推播功能，加上庫存預測按鈕（放第二行）
+        if (botInstance.features && botInstance.features.includes('push')) {
+            row2.push({"text": "📊 庫存預測"});
+        }
     }
     
-    if (row.length === 0) {
-        // 如果沒有任何按鈕，回傳關閉鍵盤的命令
-        return {
-            remove_keyboard: true
-        };
+    const keyboard = [];
+    if (row1.length > 0) keyboard.push(row1);
+    if (row2.length > 0) keyboard.push(row2);
+    
+    if (keyboard.length === 0) {
+        return { remove_keyboard: true };
     }
     
     return {
-        keyboard: [ row ],
+        keyboard,
         resize_keyboard: true,
         one_time_keyboard: false
     };
