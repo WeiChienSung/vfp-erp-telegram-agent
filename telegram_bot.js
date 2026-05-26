@@ -933,6 +933,17 @@ class TelegramBotInstance {
             }
         }
 
+        // 🛡️ 空白輸入 / 純符號 / 輸入太短防護
+        const cleanedKeyword = keyword.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】\+]+/g, '').trim();
+        if (cleanedKeyword.length === 0) {
+            sendTelegramMessage(this.token, chatId, `💡 <b>請輸入關鍵字</b>\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n例如：<code>酒精</code>、<code>3m膚色1吋</code>、<code>A222-1</code>`, myKeyboard);
+            return;
+        }
+        if (cleanedKeyword.length === 1 && /^[0-9]$/.test(cleanedKeyword)) {
+            sendTelegramMessage(this.token, chatId, `⚠️ <b>關鍵字太短</b>\n\n輸入單一數字會找到太多不相關商品。\n請輸入至少 2 個字元，例如：<code>3m</code>、<code>75</code>、<code>酒精</code>`, myKeyboard);
+            return;
+        }
+
         // 攔截並判斷是否為「客戶專屬歷史售價查詢」
         const historyQuery = parseCustomerProductQuery(keyword);
         let customerTip = '';
@@ -950,7 +961,9 @@ class TelegramBotInstance {
                     const ougo1DbPath = path.join(dbDir, 'ougo1.dbf');
                     
                     const history = queryDbfOptimized(ougo1DbPath, (record) => {
-                        const custMatch = record.NO === customerRecord.NO || record.NAME.includes(customerRecord.NAME);
+                        // 🛡️ NAME 欄位空值防護，避免 undefined.includes() 拋出 TypeError
+                        const recordName = record.NAME || '';
+                        const custMatch = record.NO === customerRecord.NO || recordName.includes(customerRecord.NAME);
                         if (!custMatch) return false;
                         
                         const normMname = normalizeText(record.MNAME);
@@ -1019,6 +1032,12 @@ class TelegramBotInstance {
 
             for (let i = 0; i < displayCount; i++) {
                 const item = searchResults[i];
+                // ⛔ 停售品警示標記
+                const nameStr = item.NAME || '';
+                const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
+                if (isStopped) {
+                    reply += `⛔ <b>[此商品已停售，請勿報價]</b>\n`;
+                }
                 reply += formatProductInfo(item);
                 reply += `-----------------------------------\n\n`;
             }

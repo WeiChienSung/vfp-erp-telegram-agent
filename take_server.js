@@ -570,7 +570,9 @@ function startWebServer() {
             req.on('end', () => {
                 try {
                     const payload = JSON.parse(body);
-                    const tempJsonPath = path.join(__dirname, 'temp_take.json');
+                    // 🛡️ 使用隨機檔名，防止並發上傳輸出互蓋
+                    const uniqueId = crypto.randomBytes(8).toString('hex');
+                    const tempJsonPath = path.join(__dirname, `temp_take_${uniqueId}.json`);
                     fs.writeFileSync(tempJsonPath, JSON.stringify(payload, null, 2), 'utf8');
 
                     const dbDir = path.dirname(config.databasePath);

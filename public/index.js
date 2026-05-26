@@ -1,4 +1,4 @@
-// Main Mobile UI Logic for ERP_Take
+﻿// Main Mobile UI Logic for ERP_Take
 document.addEventListener('DOMContentLoaded', () => {
     // 解析網址上的 token 金鑰並存入暫存
     const urlParams = new URLSearchParams(window.location.search);
@@ -367,6 +367,15 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 inputQtyPrimary.value = existing.qut || '';
             }
+            // ⚠️ 重複掃描警示
+            const prevQtyText = hasSecondary
+                ? (existing.q1 || 0) + ' ' + product.UNIT + ' + ' + (existing.q0 || 0) + ' ' + (product.UNITS || '')
+                : (existing.qut || 0) + ' ' + product.UNIT;
+            const wb = document.getElementById('duplicateScanWarning');
+            if (wb) { wb.textContent = '⚠️ 此商品上次已輸入：' + prevQtyText + '，確認艆要覆蓋？'; wb.classList.remove('hidden'); }
+        } else {
+            const wb = document.getElementById('duplicateScanWarning');
+            if (wb) wb.classList.add('hidden');
         }
 
         quantityModal.classList.remove('hidden');
@@ -642,7 +651,19 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const confirmMsg = `確定要將這 ${itemsToUpload.length} 筆盤點數據上傳至 ERP 暫存檔嗎？\n此動作將自動寫入 take1.dbf！`;
+        // 📅 讓使用者確認盤點日期（預設為今天，可修改為實際盤點日期）
+        const todayObj = new Date();
+        const todayStr = todayObj.getFullYear() + '-' + String(todayObj.getMonth() + 1).padStart(2, '0') + '-' + String(todayObj.getDate()).padStart(2, '0');
+        const chosenDate = prompt(`📅 請確認盤點日期：\n（若今天盤點請直接按確定；若昨天盤點今天才傳，請修改日期）\n\n格式：YYYY-MM-DD`, todayStr);
+        if (!chosenDate) return;
+        const dateParts = chosenDate.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (!dateParts) {
+            alert('日期格式錯誤，請使用 YYYY-MM-DD 格式（例如 2026-05-26）');
+            return;
+        }
+        const yyyymmdd = dateParts[1] + dateParts[2] + dateParts[3];
+
+        const confirmMsg = `確定要將這 ${itemsToUpload.length} 筆盤點數據上傳至 ERP？\n\n📅 盤點日期：${chosenDate}\n此動作將自動寫入 take1.dbf！`;
         if (!confirm(confirmMsg)) return;
 
         // Display uploading badge status
@@ -650,7 +671,6 @@ document.addEventListener('DOMContentLoaded', () => {
         btnUploadTake.innerHTML = '<div class="spinner" style="width:16px;height:16px;margin:0 8px 0 0;"></div>上傳中...';
 
         const now = new Date();
-        const yyyymmdd = now.getFullYear() + String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0');
         const hhmmss = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
 
         const payload = {
