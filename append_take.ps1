@@ -285,22 +285,24 @@ if (-not (Test-Path $take1Path)) {
     exit 1
 }
 
-# Pre-check locks (try opening both files for ReadWrite share ReadWrite)
+# 同時持有兩個檔案的寫入鎖，消除 TOCTOU 競爭條件
+# 只有當兩個檔案都能成功開啟時，才繼續進行寫入
+$takeStream = $null
+$take1Stream = $null
+
 try {
-    $testTake = [System.IO.File]::Open($takePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
-    $testTake.Close()
+    $takeStream = [System.IO.File]::Open($takePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    $take1Stream = [System.IO.File]::Open($take1Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
 } catch {
-    Write-Error "Cannot open/lock take.dbf: $($_.Exception.Message)"
+    if ($takeStream) { $takeStream.Close() }
+    if ($take1Stream) { $take1Stream.Close() }
+    Write-Error "預檢失敗：資料庫檔案正被 ERP 獨佔使用中。錯誤: $($_.Exception.Message)"
     exit 1
 }
 
-try {
-    $testTake1 = [System.IO.File]::Open($take1Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
-    $testTake1.Close()
-} catch {
-    Write-Error "Cannot open/lock take1.dbf: $($_.Exception.Message)"
-    exit 1
-}
+# 關閉鎖定串流，讓函數內部重新開啟進行正式讀寫
+$takeStream.Close()
+$take1Stream.Close()
 
 # If both are openable, proceed
 Append-To-Take $takePath $dateStr $timeStr

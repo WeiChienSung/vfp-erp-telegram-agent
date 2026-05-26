@@ -178,11 +178,12 @@ function readStockDb(dbPath, keyword = null) {
                     // 純中文 (如 "酒精", "針頭") -> 保留完整詞彙
                     queryTokens.push(part);
                 } else {
-                    // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 拆分中英數
-                    const regex = /[a-z]+|[0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/g;
+                    // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 在中文與英數字邊界上拆分
+                    // 保留英數字組合 (e.g. "3m" 保持為 "3m"，而非拆成 "3" 和 "m")
+                    const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/gi;
                     let match;
                     while ((match = regex.exec(part)) !== null) {
-                        queryTokens.push(match[0]);
+                        queryTokens.push(match[0].toLowerCase());
                     }
                 }
             }
