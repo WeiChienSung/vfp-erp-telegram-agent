@@ -1041,7 +1041,7 @@ class TelegramBotInstance {
         }
 
         // 處理庫存預測報告指令 (僅限管理員機器人 BOT_1 且有 push 功能)
-        if (text === '庫存預測' || text.toLowerCase() === '/stock_forecast') {
+        if (text === '庫存預測' || text === '📊 庫存預測' || text.toLowerCase() === '/stock_forecast') {
             if (!isSelf) return;
             if (!this.features.includes('push')) {
                 sendTelegramMessage(this.token, chatId, `⚠️ 本機器人未啟用推播功能（push），無法使用庫存預測。`, myKeyboard);
