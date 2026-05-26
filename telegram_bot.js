@@ -678,22 +678,33 @@ function formatProductInfo(item) {
     return info;
 }
 
-// 全域常用鍵盤樣式 (拆分為管理員專用與一般員工專用)
-const ADMIN_KEYBOARD = {
-    keyboard: [
-        [{"text": "📋 開始盤點"}, {"text": "⚙️ 管理後台"}]
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false
-};
-
-const USER_KEYBOARD = {
-    keyboard: [
-        [{"text": "📋 開始盤點"}]
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false
-};
+// 動態產生機器人自訂鍵盤 (依功能與權限)
+function getBotKeyboard(botInstance) {
+    const row = [];
+    
+    // 只有在啟用 'take' (盤點) 功能時才顯示開始盤點按鈕
+    if (botInstance.features && botInstance.features.includes('take')) {
+        row.push({"text": "📋 開始盤點"});
+    }
+    
+    // 只有 BOT_1 (管理員機器人) 才顯示管理後台按鈕
+    if (botInstance.name === 'BOT_1') {
+        row.push({"text": "⚙️ 管理後台"});
+    }
+    
+    if (row.length === 0) {
+        // 如果沒有任何按鈕，回傳關閉鍵盤的命令
+        return {
+            remove_keyboard: true
+        };
+    }
+    
+    return {
+        keyboard: [ row ],
+        resize_keyboard: true,
+        one_time_keyboard: false
+    };
+}
 
 // 4. 物件導向機器人執行類別 (TelegramBotInstance)
 class TelegramBotInstance {
@@ -799,9 +810,8 @@ class TelegramBotInstance {
         const text = update.message.text.trim();
         const chatName = update.message.chat.title || update.message.chat.username || update.message.chat.first_name || '未知用戶';
 
-        // 決定使用管理員鍵盤或一般用戶鍵盤 (BOT_1 為管理員)
-        const isSelf = this.name === 'BOT_1';
-        const myKeyboard = isSelf ? ADMIN_KEYBOARD : USER_KEYBOARD;
+        // 動態決定使用自訂鍵盤
+        const myKeyboard = getBotKeyboard(this);
 
         console.log(`[訊息 - ${this.name}] 收到來自 [${chatName}] (${chatId}) 的訊息: "${text}"`);
 
