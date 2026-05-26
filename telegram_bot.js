@@ -467,9 +467,19 @@ function parseCustomerProductQuery(text) {
                 if (isPureNumber) {
                     return normNo === norm;
                 } else {
-                    return normNo.includes(norm) || normName.includes(norm) || normName1.includes(norm);
+                    if (word.length === 1) {
+                        // 單字搜尋只允許精確匹配簡稱或代號，防止「膚」、「藥」等字誤判
+                        return normNo === norm || normName1 === norm;
+                    } else {
+                        return normNo.includes(norm) || normName.includes(norm) || normName1.includes(norm);
+                    }
                 }
-            }, { limit: 5, fieldsToExtract: ['NO', 'NAME', 'NAME1'] });
+            }, { limit: 10, fieldsToExtract: ['NO', 'NAME', 'NAME1'] });
+
+            // 若匹配數大於 3 筆，代表此關鍵字為「藥局」、「公司」等通用後綴，不視為客戶
+            if (customerMatches.length > 3) {
+                customerMatches = [];
+            }
         } catch (e) {
             console.error('[分類器] 查詢 CUST.DBF 失敗:', e.message);
         }
