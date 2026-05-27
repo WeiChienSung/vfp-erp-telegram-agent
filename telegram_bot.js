@@ -130,35 +130,40 @@ let stockCache = {
  * 避免每次查詢都重複執行檔案 I/O、Big5 解碼與欄位解析
  */
 function getStockRecords(dbPath) {
-    if (!fs.existsSync(dbPath)) {
-        throw new Error(`找不到資料庫檔案: ${dbPath}`);
-    }
-    
-    const stat = fs.statSync(dbPath);
-    const mtimeMs = stat.mtime.getTime();
-    
-    // 若路徑相同且修改時間未變，直接回傳記憶體快取，效能提升數百倍
-    if (stockCache.dbPath === dbPath && stockCache.mtimeMs === mtimeMs && stockCache.records.length > 0) {
-        return stockCache.records;
-    }
-    
-    console.log(`[快取系統] 偵測到資料庫變更或尚未載入，開始重建商品快取...`);
-    const start = Date.now();
-    
     let fileBuffer;
+    let stat;
+    let mtimeMs = 0;
     let retries = 3;
     let delay = 150;
+    
     while (retries > 0) {
         try {
+            if (!fs.existsSync(dbPath)) {
+                throw new Error(`找不到資料庫檔案: ${dbPath}`);
+            }
+            stat = fs.statSync(dbPath);
+            mtimeMs = stat.mtime.getTime();
+            
+            // 若路徑相同且修改時間未變，直接回傳記憶體快取
+            if (stockCache.dbPath === dbPath && stockCache.mtimeMs === mtimeMs && stockCache.records.length > 0) {
+                return stockCache.records;
+            }
+            
             fileBuffer = fs.readFileSync(dbPath);
             break;
         } catch (err) {
             retries--;
-            if (retries === 0) throw err;
-            console.warn(`[資料庫] 快取載入忙碌，將於 ${delay}ms 後重試...`);
+            if (retries === 0) {
+                console.error(`[資料庫] 載入商品庫失敗，已達最大重試次數: ${err.message}`);
+                throw err;
+            }
+            console.warn(`[資料庫] 商品庫載入忙碌或網路抖動，將於 ${delay}ms 後重試...`);
             sleepSync(delay);
         }
     }
+    
+    console.log(`[快取系統] 偵測到資料庫變更或尚未載入，開始重建商品快取...`);
+    const start = Date.now();
     
     const recordCount = fileBuffer.readInt32LE(4);
     const headerLength = fileBuffer.readInt16LE(8);
@@ -700,6 +705,121 @@ function queryDbfInMemory(dbPath, filterFn, options = {}) {
     return results;
 }
 
+// 全域客戶資料快取
+let customerCache = {
+    dbPath: '',
+    mtimeMs: 0,
+    records: []
+};
+
+/**
+ * 取得最新客戶紀錄（含記憶體快取與增量更新機制）
+ */
+function getCustomerRecords(dbPath) {
+    let fileBuffer;
+    let stat;
+    let mtimeMs = 0;
+    let retries = 3;
+    let delay = 150;
+    
+    while (retries > 0) {
+        try {
+            if (!fs.existsSync(dbPath)) {
+                throw new Error(`找不到資料庫檔案: ${dbPath}`);
+            }
+            stat = fs.statSync(dbPath);
+            mtimeMs = stat.mtime.getTime();
+            
+            // 若路徑相同且修改時間未變，直接回傳記憶體快取
+            if (customerCache.dbPath === dbPath && customerCache.mtimeMs === mtimeMs && customerCache.records.length > 0) {
+                return customerCache.records;
+            }
+            
+            fileBuffer = fs.readFileSync(dbPath);
+            break;
+        } catch (err) {
+            retries--;
+            if (retries === 0) {
+                console.error(`[資料庫] 載入客戶庫失敗，已達最大重試次數: ${err.message}`);
+                throw err;
+            }
+            console.warn(`[資料庫] 客戶庫載入忙碌或網路抖動，將於 ${delay}ms 後重試...`);
+            sleepSync(delay);
+        }
+    }
+    
+    console.log(`[快取系統] 偵測到客戶資料庫變更或尚未載入，開始重建客戶快取...`);
+    const start = Date.now();
+    
+    const recordCount = fileBuffer.readInt32LE(4);
+    const headerLength = fileBuffer.readInt16LE(8);
+    const recordLength = fileBuffer.readInt16LE(10);
+    
+    const fields = [];
+    let offset = 32;
+    let currentRecordOffset = 1;
+    
+    while (offset < headerLength - 1) {
+        const fieldBuffer = fileBuffer.subarray(offset, offset + 32);
+        if (fieldBuffer[0] === 0x0D) break;
+        let ne = 0;
+        while (ne < 11 && fieldBuffer[ne] !== 0) ne++;
+        const name = fieldBuffer.subarray(0, ne).toString('ascii').trim();
+        const type = String.fromCharCode(fieldBuffer[11]);
+        const len = fieldBuffer[16];
+        
+        fields.push({
+            name,
+            type,
+            length: len,
+            offset: currentRecordOffset
+        });
+        currentRecordOffset += len;
+        offset += 32;
+    }
+    
+    const big5Decoder = new TextDecoder('big5');
+    const records = [];
+    
+    const targetFields = ['NO', 'NAME', 'NAME1'];
+    
+    for (let r = 0; r < recordCount; r++) {
+        const filePos = headerLength + (r * recordLength);
+        if (filePos + recordLength > fileBuffer.length) break;
+        if (fileBuffer[filePos] === 0x2A) continue; // 排除已刪除紀錄
+        
+        const recordBuf = fileBuffer.subarray(filePos, filePos + recordLength);
+        const record = {};
+        
+        for (const f of fields) {
+            if (targetFields.includes(f.name)) {
+                const rawVal = recordBuf.subarray(f.offset, f.offset + f.length);
+                let end = rawVal.length;
+                while (end > 0 && (rawVal[end - 1] === 0x20 || rawVal[end - 1] === 0x00)) end--;
+                record[f.name] = big5Decoder.decode(rawVal.subarray(0, end));
+            }
+        }
+        
+        if (!record['NO']) continue;
+        
+        // 預解析標準化欄位，加快篩選
+        record._normNo = normalizeText(record['NO']);
+        record._normName = normalizeText(record['NAME'] || '');
+        record._normName1 = normalizeText(record['NAME1'] || '');
+        
+        records.push(record);
+    }
+    
+    customerCache = {
+        dbPath,
+        mtimeMs,
+        records
+    };
+    
+    console.log(`[快取系統] 客戶快取重建完成，共載入 ${records.length} 筆客戶紀錄。耗時: ${Date.now() - start}ms`);
+    return records;
+}
+
 const COMMON_SUFFIXES = new Set(['藥局', '診所', '公司', '醫院', '藥房', '護理之家', '衛生所', '牙醫', '眼科', '中醫', '婦產科', '耳鼻喉科', '小兒科']);
 
 function parseCustomerProductQuery(text) {
@@ -720,15 +840,16 @@ function parseCustomerProductQuery(text) {
         const isPureNumber = /^\d+$/.test(word);
         const isGenericSuffix = COMMON_SUFFIXES.has(norm);
         
-        // Search in CUST.DBF
+        // Search in CUST.DBF (使用記憶體快取優化版)
         let customerMatches = [];
         let multipleCustomers = null;
         if (!isGenericSuffix) {
             try {
-                customerMatches = queryDbfOptimized(custDbPath, (record) => {
-                    const normNo = normalizeText(record.NO);
-                    const normName = normalizeText(record.NAME);
-                    const normName1 = normalizeText(record.NAME1);
+                const allCustomers = getCustomerRecords(custDbPath);
+                customerMatches = allCustomers.filter(record => {
+                    const normNo = record._normNo;
+                    const normName = record._normName;
+                    const normName1 = record._normName1;
                     
                     if (isPureNumber) {
                         return normNo === norm;
@@ -740,7 +861,7 @@ function parseCustomerProductQuery(text) {
                             return normNo.includes(norm) || normName.includes(norm) || normName1.includes(norm);
                         }
                     }
-                }, { limit: 10, fieldsToExtract: ['NO', 'NAME', 'NAME1'] });
+                }).slice(0, 10); // 限制最多匹配 10 筆
 
                 // 若匹配數大於 3 筆，代表此關鍵字為「藥局」、「公司」等通用後綴，不視為客戶
                 if (customerMatches.length > 3) {
@@ -748,7 +869,7 @@ function parseCustomerProductQuery(text) {
                     customerMatches = [];
                 }
             } catch (e) {
-                console.error('[分類器] 查詢 CUST.DBF 失敗:', e.message);
+                console.error('[分類器] 查詢客戶快取失敗:', e.message);
             }
         }
 
