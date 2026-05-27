@@ -1555,7 +1555,7 @@ try {
     const devBot = config.bots.find(b => b.name === 'BOT_1');
     if (devBot && devBot.token) {
         const devChatId = 5976208790;
-        if (devBot.authorizedChats.includes(devChatId)) {
+        if (Array.isArray(devBot.authorizedChats) && devBot.authorizedChats.includes(devChatId)) {
             sendTelegramMessage(
                 devBot.token,
                 devChatId,
