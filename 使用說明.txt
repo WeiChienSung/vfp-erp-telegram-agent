@@ -164,3 +164,6 @@ C:\agy_Add_on\
    - 啟動資料夾中的 `ERP_隨身查.vbs` 已被改寫，電腦開機並登入後會自動加載托盤 `tray.ps1`。
    - 托盤在運行時，會**自動在背景拉起 restart_services.ps1**，將 3 個服務全部順利運行在隱藏視窗中。您只需查看電腦右下角有無小圖示，即可掌握所有服務的運行狀態。
 
+4. 🛠️ 技術修復與優化細節 (隨身查助理專屬)：
+   - **VBS 啟動代理移位與編碼修復**：為了防止 Windows Script Host (WScript) 對無 BOM 的 UTF-8 腳本在有中文路徑 `C:\agy_Add_on\ERP 隨身查與盤點` 時解析出 `?` 字元並噴出「路徑語法錯誤」而閃退，目前系統的啟動 wrapper (`run_take.vbs`, `run_query.vbs`, `run_bridge.vbs`) 已被全部移動到純英文目錄 `C:\agy_Add_on\` 底下，且檔案編碼全部統一轉換為本機系統原生的 Big5 (CP950) 編碼，並結合絕對路徑呼叫，以 100% 根除中文路徑編碼閃退 Bug。
+   - **無干擾自癒重連**：Localtunnel 在斷線自動重連成功時，`take_server.js` 會靜默更新安全網址，不再重複發送 Telegram 推播通知以防打擾使用者。

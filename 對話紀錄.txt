@@ -231,9 +231,12 @@
   - 將 AI 助理的所有程式碼與本機腳本單獨整理至獨立資料夾，不要與 ERP 常規的查價、盤點程式搞混。
   - 解決「不想每次都在 IDE 點同意」的困擾，提供完全的背景自動化。
   - 希望當需要 AI 助理時，能透過 Windows 畫面右下角（工作列/系統托盤）的小圖示快速存取，並提供重啟、停止、查看外網網址等選單。
+  - 修復 WScript 對於中文目錄 `C:\agy_Add_on\ERP 隨身查與盤點` 的解碼錯誤，以及背景啟動時子進程隨父視窗關閉而終止的生命週期耦合問題。
 * 開發與實作：
   1. **AI 助理專屬隔離目錄**：在主目錄下新建 `ai_assistant/`，將 `telegram_bridge.js`、輔助指令腳本（`screenshot.ps1`、`restart_services.ps1` 等）移入其中，並將內部絕對路徑重構為相對路徑。
   2. **Windows 原生系統列托盤監控 (tray.ps1)**：使用 .NET WinForms 技術開發原生托盤小圖示。雙擊（左鍵兩下）或選單點選「與 AI 助理對話」能自動在電腦上打開 Telegram 進行對話；右鍵選單提供查看外網網址、一鍵重啟/停止所有服務、退出程式等功能，極其輕量，完全無須額外 npm 套件。
-  3. **開機啟動與重啟整合**：將 Windows 啟動目錄中的 `ERP_隨身查.vbs` 改為僅加載 `tray.ps1`，托盤啟動時會自動調用 `restart_services.ps1`，將查價、盤點與 AI 助理橋接共 3 個 Node 背景服務一併隱形拉起。
+  3. **開機啟動與重啟整合 (VBS 移位與編碼修復)**：
+     - 為了徹底解決 Windows Script Host (wscript) 對於無 BOM 的 UTF-8 中文路徑解析為 `?` 導致閃退的 Bug，將本機啟動 wrapper VBS (`run_take.vbs`, `run_query.vbs`, `run_bridge.vbs`) 重新以 CP950 (Big5) 編碼寫入並全部移至根目錄純英文路徑 `C:\agy_Add_on\` 底下，配合內部的絕對路徑引導執行。
+     - 改寫 `restart_services.ps1`：將啟動 node 進程改用 `WScript.Shell` 呼叫這些純英文路徑下的 VBS Wrapper。因為 VBS 中的 WScript.Shell.Run 具有完全脫離（Detached）的生命週期特性，成功讓這三個 Node 背景服務在啟動它的 PowerShell/cscript 腳本關閉後，依然能夠穩定在背景獨立常駐，不被 Sandbox 安全回收。
   4. **IDE 權限持久化授權**：主動向 IDE 申請了對 `Desktop\vfp-erp-telegram-agent` 及 `git` 命令的永久核准，徹底消滅了日常同步與推送 GitHub 時的 IDE 確認彈窗。
   5. **文件與紀錄更新**：更新了 `使用說明.txt` 與 `對話紀錄.txt`，並同步推送至 GitHub，完成重構工作。
