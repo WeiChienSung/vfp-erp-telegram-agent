@@ -24,10 +24,11 @@ $takeVbs = Join-Path $parentDir "run_take.vbs"
 $queryVbs = Join-Path $parentDir "run_query.vbs"
 $bridgeVbs = Join-Path $PSScriptRoot "run_bridge.vbs"
 
-# 3. Start Node services by directly invoking VBScript wrappers using PowerShell call operator (&)
-# This bypasses external command-line argument encoding conversion errors
-& $takeVbs
-& $queryVbs
-& $bridgeVbs
+# 3. Start Node services via VBScript wrappers using WScript.Shell COM Object
+# WScript.Shell natively handles Unicode strings (Chinese paths) and runs without console flashing
+$ws = New-Object -ComObject WScript.Shell
+$ws.Run("wscript.exe `"$takeVbs`"", 0, $false)
+$ws.Run("wscript.exe `"$queryVbs`"", 0, $false)
+$ws.Run("wscript.exe `"$bridgeVbs`"", 0, $false)
 
 Write-Output "Services restarted successfully."
