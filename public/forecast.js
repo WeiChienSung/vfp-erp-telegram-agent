@@ -50,6 +50,14 @@ async function loadForecast() {
             throw new Error(err.error || res.statusText);
         }
         const data = await res.json();
+        
+        // 如果伺服器回傳正在背景計算快取中，則在 3 秒後自動輪詢重試
+        if (data.loading) {
+            document.getElementById('headerSub').textContent = data.message || '資料正在背景計算中，請稍候...';
+            setTimeout(loadForecast, 3000);
+            return;
+        }
+        
         allItems     = data.items || [];
         forecastMeta = data.meta  || {};
         prioritySet  = new Set((forecastMeta.priorityProducts || []).map(x => String(x).toLowerCase()));

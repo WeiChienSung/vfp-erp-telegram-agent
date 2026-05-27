@@ -563,6 +563,8 @@ let tunnelUrl = '';
 
 let ltProcess = null;
 let tunnelCheckInterval = null;
+let ltStartupTimeout = null;
+let ltSubdomainRetryCount = 0;
 
 function checkTunnelAlive(url) {
     if (!url) return;
@@ -575,11 +577,13 @@ function checkTunnelAlive(url) {
         port: 443,
         path: '/index.js',
         method: 'GET',
-        timeout: 8000,
         rejectUnauthorized: false // 忽略可能發生的 SSL 憑證錯誤
     };
 
+    let isFinished = false;
     const req = https.request(options, (res) => {
+        isFinished = true;
+        clearTimeout(timeoutTimer);
         if (res.statusCode === 200) {
             console.log(`[存活檢測] 外網通道正常！(Status: ${res.statusCode})`);
         } else {
@@ -588,14 +592,19 @@ function checkTunnelAlive(url) {
         }
     });
 
-    req.on('error', (e) => {
-        console.error(`[存活檢測] 外網通道連線失敗: ${e.message}，準備重建通道...`);
-        rebuildTunnel();
-    });
+    // 建立 8 秒手動連線與讀取超時保護，防範 DNS/TCP 握手階段掛起
+    const timeoutTimer = setTimeout(() => {
+        if (!isFinished) {
+            req.destroy();
+            console.error(`[存活檢測] 外網通道連線或回應超時 (8秒無回應)，準備重建通道...`);
+            rebuildTunnel();
+        }
+    }, 8000);
 
-    req.on('timeout', () => {
-        req.destroy();
-        console.error(`[存活檢測] 外網通道超時 (8秒無回應)，準備重建通道...`);
+    req.on('error', (e) => {
+        isFinished = true;
+        clearTimeout(timeoutTimer);
+        console.error(`[存活檢測] 外網通道連線失敗: ${e.message}，準備重建通道...`);
         rebuildTunnel();
     });
 
@@ -607,11 +616,22 @@ function rebuildTunnel() {
         clearInterval(tunnelCheckInterval);
         tunnelCheckInterval = null;
     }
+    if (ltStartupTimeout) {
+        clearTimeout(ltStartupTimeout);
+        ltStartupTimeout = null;
+    }
     if (ltProcess) {
-        console.log('[系統] 存活檢測判定通道假死，正在關閉舊的 Localtunnel 進程...');
+        console.log('[系統] 正在重建通道，關閉舊的 Localtunnel 進程...');
         try {
-            ltProcess.kill('SIGTERM');
-        } catch(e) {}
+            // 在 Windows 上使用 taskkill /F /T /PID 強制關閉整個進程樹，避免殘留孤兒 node.exe 進程佔用子網域
+            if (process.platform === 'win32') {
+                spawn('taskkill', ['/F', '/T', '/PID', String(ltProcess.pid)]);
+            } else {
+                ltProcess.kill('SIGTERM');
+            }
+        } catch(e) {
+            console.error('[錯誤] 關閉 Localtunnel 進程失敗:', e.message);
+        }
     }
 }
 
@@ -619,19 +639,36 @@ function startTunnel() {
     const subdomainVal = config.subdomain || "nmedi-erp-take";
     console.log(`[系統] 正在建立 Localtunnel 安全加密通道 (固定子網域: ${subdomainVal})...`);
     
-    ltProcess = spawn('npx.cmd', ['localtunnel', '--port', '3000', '--subdomain', subdomainVal], { shell: true });
+    if (ltStartupTimeout) clearTimeout(ltStartupTimeout);
+    
+    // 使用 npx -y 確保自動下載並運行，不會因 npm 提示交互而掛起
+    ltProcess = spawn('npx.cmd', ['-y', 'localtunnel', '--port', '3000', '--subdomain', subdomainVal], { shell: true });
+    
+    // 設定 20 秒啟動超時保護，如果 20 秒內沒有成功建立通道，則強制重試自愈
+    ltStartupTimeout = setTimeout(() => {
+        console.warn('[系統] Localtunnel 建立通道超時 (20秒未分配網址)，強制重建...');
+        rebuildTunnel();
+    }, 20000);
     
     ltProcess.stdout.on('data', (data) => {
         const text = data.toString();
         console.log(`[Localtunnel] ${text.trim()}`);
         if (text.includes('your url is:')) {
+            // 成功獲取網址，清除啟動超時保護
+            if (ltStartupTimeout) {
+                clearTimeout(ltStartupTimeout);
+                ltStartupTimeout = null;
+            }
+            
             const match = text.match(/https:\/\/[^\s]+/);
             if (match) {
                 const baseTunnelUrl = match[0].trim();
                 
-                // 檢查實際獲取的子網域是否相符
+                // 檢查實際獲取的子網域是否相符，如果不相符，代表舊通道被佔用尚未被網關釋放
                 if (!baseTunnelUrl.includes(subdomainVal)) {
-                    console.warn(`[Localtunnel 警告] 要求的子網域 "${subdomainVal}" 被佔用或不可用，實際分配的網址為: ${baseTunnelUrl}`);
+                    console.warn(`[Localtunnel 提示] 要求的固定子網域 "${subdomainVal}" 目前被佔用或不可用。已安全降級使用分配到的臨時隨機網址: ${baseTunnelUrl}`);
+                } else {
+                    console.log(`[Localtunnel] 成功取得要求的固定子網域: ${baseTunnelUrl}`);
                 }
                 
                 // 加上金鑰 Token
@@ -662,6 +699,10 @@ function startTunnel() {
         if (tunnelCheckInterval) {
             clearInterval(tunnelCheckInterval);
             tunnelCheckInterval = null;
+        }
+        if (ltStartupTimeout) {
+            clearTimeout(ltStartupTimeout);
+            ltStartupTimeout = null;
         }
         setTimeout(startTunnel, 5000);
     });
@@ -905,13 +946,18 @@ function startWebServer() {
                     return;
                 }
                 
-                console.log('[API /api/forecast] 快取尚未初始化，執行首次同步計算...');
-                const result = calcForecastData();
-                forecastCache = result;
-                forecastCacheTime = Date.now();
+                // 如果背景工作線程正在計算中，則直接返回 Loading 狀態，決不進行同步計算阻塞主線程！
+                if (isCalculatingForecastBackground) {
+                    res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+                    res.end(JSON.stringify({ loading: true, message: '背景快取正在計算中，請在 5 秒後重新整理網頁...' }));
+                    return;
+                }
                 
-                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify(result));
+                console.log('[API /api/forecast] 快取尚未初始化，且未在計算中，觸發背景非同步重算...');
+                refreshForecastCacheBackground();
+                
+                res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ loading: true, message: '已啟動背景庫存預估計算，預計耗時 15 秒，請稍候...' }));
             } catch (err) {
                 console.error('[API /api/forecast] 計算失敗:', err.message);
                 res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });

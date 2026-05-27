@@ -740,8 +740,79 @@ function calcDynamicThresholds(forceRefresh = false) {
     }
 }
 
-// 產生完整庫存預測報告文字
-function generateForecastReport(includeHealthy = false) {
+// 產生完整庫存預測報告文字（非同步版，優先使用本地 Web Server 預估快取）
+async function generateForecastReport(includeHealthy = false) {
+    try {
+        const data = await new Promise((resolve, reject) => {
+            const req = http.get('http://127.0.0.1:3000/api/forecast', { timeout: 2000 }, (res) => {
+                if (res.statusCode !== 200) {
+                    return reject(new Error(`HTTP ${res.statusCode}`));
+                }
+                let body = '';
+                res.on('data', chunk => body += chunk);
+                res.on('end', () => {
+                    try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+                });
+            });
+            req.on('error', reject);
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('timeout'));
+            });
+        });
+        
+        const leadDays = data.meta.leadDays || 7;
+        const leadDaysText = `${leadDays} 工作天`;
+        
+        const urgent = data.items.filter(i => i.level === 'urgent');
+        const watch = data.items.filter(i => i.level === 'watch');
+        
+        // 依剩餘天數排序
+        urgent.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+        watch.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+        
+        let report = '';
+        if (urgent.length > 0) {
+            report += `🔴 <b>【緊急補貨 - 庫存不足 ${leadDaysText}】</b>\n`;
+            urgent.slice(0, 15).forEach((i) => {
+                report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
+                if (i.lowWater !== null) {
+                    report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 低水位：${i.lowWater}\n`;
+                    report += `  ⏰ 預估僅剩 <b>${i.daysLeft} 工作天</b> 存量\n\n`;
+                } else {
+                    report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} （無出貨紀錄，庫存偏低）\n\n`;
+                }
+            });
+            if (urgent.length > 15) report += `  <i>...還有 ${urgent.length - 15} 筆緊急品項</i>\n`;
+            report += `-----------------------------------\n\n`;
+        }
+        
+        if (watch.length > 0) {
+            report += `🟡 <b>【需關注 - 庫存約 ${leadDaysText}~30 天】</b>\n`;
+            watch.slice(0, 10).forEach((i) => {
+                report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
+                report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 預估剩 <b>${i.daysLeft} 天</b>\n\n`;
+            });
+            if (watch.length > 10) report += `  <i>...還有 ${watch.length - 10} 筆需關注品項</i>\n`;
+            report += `-----------------------------------\n\n`;
+        }
+        
+        console.log(`[智慧預測] 成功使用本地 Web Server 快取產出預測報告。`);
+        return {
+            report,
+            urgentCount: urgent.length,
+            watchCount: watch.length,
+            totalActive: data.meta.totalActive
+        };
+        
+    } catch (err) {
+        console.warn(`[智慧預測] 無法取得本地 Web Server 快取 (${err.message})，將降級為同步讀取 DBF 計算...`);
+        return generateForecastReportSync(includeHealthy);
+    }
+}
+
+// 產生完整庫存預測報告文字（同步降級版，直接掃描 DBF）
+function generateForecastReportSync(includeHealthy = false) {
     const allItems = readStockDb(config.databasePath, null, false);
     const activeItems = allItems.filter(item => {
         const name = item.NAME || '';
@@ -989,7 +1060,7 @@ class TelegramBotInstance {
         });
     }
 
-    processUpdate(update) {
+    async processUpdate(update) {
         if (!update.message || !update.message.text) return;
         
         const chatId = update.message.chat.id;
@@ -1073,7 +1144,7 @@ class TelegramBotInstance {
             isCalculatingForecast = true;
             sendTelegramMessage(this.token, chatId, `⏳ <b>正在計算庫存預測...</b>\n正在從 ERP 分析最近 2 年銷售紀錄，請稍候約 10~30 秒...`, myKeyboard);
             try {
-                const { urgentCount, watchCount, totalActive } = generateForecastReport(false);
+                const { urgentCount, watchCount, totalActive } = await generateForecastReport(false);
                 const leadDays = config.lowStockLeadTimeDays || 7;
                 const minSales = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
 
@@ -1405,7 +1476,7 @@ function checkScheduledPush() {
     }
 }
 
-function triggerLowStockPush() {
+async function triggerLowStockPush() {
     const pushBots = config.bots.filter(b => b.features && b.features.includes('push') && b.token && b.authorizedChats && b.authorizedChats.length > 0);
     if (pushBots.length === 0) {
         console.log('[排程] 尚未有任何機器人啟用「庫存推播」或無授權聊天室，取消本次推播。');
@@ -1413,11 +1484,68 @@ function triggerLowStockPush() {
     }
 
     try {
-        const allItems = readStockDb(config.databasePath, null, false);
-        const activeItems = allItems.filter(item => {
-            const name = item.NAME || '';
-            return !name.includes('停產') && !name.includes('停用') && !name.includes('停售');
-        });
+        let data;
+        try {
+            // 嘗試從本地的 take_server (Port 3000) 獲取背景已預算好的庫存預測資料
+            data = await new Promise((resolve, reject) => {
+                const req = http.get('http://127.0.0.1:3000/api/forecast', { timeout: 2000 }, (res) => {
+                    if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+                    let body = '';
+                    res.on('data', chunk => body += chunk);
+                    res.on('end', () => {
+                        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+                    });
+                });
+                req.on('error', reject);
+                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+            });
+            console.log(`[排程] 成功使用本地 Web Server 預估快取進行每日推播。`);
+        } catch (localErr) {
+            console.warn(`[排程] 無法獲取本地 Web Server 快取 (${localErr.message})，將降級為同步讀取 DBF 計算...`);
+            // 降級：如果本地服務掛了，無縫退回到傳統的同步掃描與計算
+            const allItems = readStockDb(config.databasePath, null, false);
+            const activeItems = allItems.filter(item => {
+                const name = item.NAME || '';
+                return !name.includes('停產') && !name.includes('停用') && !name.includes('停售');
+            });
+            const thresholds = calcDynamicThresholds();
+            const fallback = config.lowStockFallback !== undefined ? config.lowStockFallback : 5;
+            const leadDays = config.lowStockLeadTimeDays || 7;
+            const syncReport = generateForecastReportSync(false);
+            
+            // 將結構對齊以統一後續處理邏輯
+            data = {
+                items: activeItems.map(item => {
+                    const th = thresholds[item.NO];
+                    const daysLeft = th && th.avgDailyWork > 0 ? Math.round(item.INVQT / th.avgDailyWork) : null;
+                    let level = 'healthy';
+                    if (th) {
+                        if (item.INVQT <= th.lowWater) {
+                            level = (daysLeft !== null && daysLeft <= leadDays) ? 'urgent' : 'watch';
+                        }
+                    } else if (item.INVQT > 0 && item.INVQT <= fallback) {
+                        level = 'urgent';
+                    }
+                    return {
+                        no: item.NO.trim(),
+                        name: item.NAME.trim(),
+                        unit: item.UNIT.trim(),
+                        stock: item.INVQT,
+                        daysLeft,
+                        level,
+                        avgMonthly: th ? th.avgMonthly : null,
+                        lowWater: th ? th.lowWater : null
+                    };
+                }),
+                meta: {
+                    leadDays,
+                    urgentCount: syncReport.urgentCount,
+                    watchCount: syncReport.watchCount,
+                    totalActive: syncReport.totalActive,
+                    reportText: syncReport.report
+                }
+            };
+        }
 
         // 庫存快照（偵測剛斷貨）
         let previousStockMap = {};
@@ -1426,29 +1554,26 @@ function triggerLowStockPush() {
             catch (e) { console.error('[排程] 載入庫存快照失敗:', e.message); }
         }
 
-        // 取得動態低水位
-        const thresholds = calcDynamicThresholds();
-        const fallback = config.lowStockFallback !== undefined ? config.lowStockFallback : 5;
-        const leadDays = config.lowStockLeadTimeDays || 7;
-
         const zeroStockTransitions = [];
-        const { report, urgentCount, watchCount } = generateForecastReport(false);
-
+        
         // 偵測剛斷貨商品
-        for (const item of activeItems) {
-            const currentStock = item.INVQT || 0;
-            const previousStock = previousStockMap[item.NO];
+        for (const item of data.items) {
+            const currentStock = item.stock || 0;
+            const previousStock = previousStockMap[item.no];
             if (previousStock !== undefined && previousStock > 0 && currentStock <= 0) {
-                zeroStockTransitions.push({ item, previousStock });
+                zeroStockTransitions.push({
+                    item: { NAME: item.name, NO: item.no, UNIT: item.unit, INVQT: item.stock },
+                    previousStock
+                });
             }
         }
 
         // 更新庫存快照
         const currentStockMap = {};
-        for (const item of activeItems) { currentStockMap[item.NO] = item.INVQT || 0; }
+        for (const item of data.items) { currentStockMap[item.no] = item.stock || 0; }
         try {
             fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(currentStockMap, null, 2), 'utf8');
-            console.log(`[排程] 庫存快照已更新。活動商品: ${activeItems.length}`);
+            console.log(`[排程] 庫存快照已更新。活動商品: ${data.items.length}`);
         } catch (e) { console.error('[排程] 寫入庫存快照失敗:', e.message); }
 
         const isFirstRun = Object.keys(previousStockMap).length === 0;
@@ -1466,21 +1591,60 @@ function triggerLowStockPush() {
             reply += `-----------------------------------\n\n`;
         }
 
-        // 動態低水位警報
-        if (report) {
-            reply += report;
+        // 動態低水位警報 (優先使用預算好的文字，若無則生成)
+        let reportText = data.meta.reportText;
+        if (reportText === undefined) {
+            // 由 cached items 生成
+            const leadDays = data.meta.leadDays || 7;
+            const leadDaysText = `${leadDays} 工作天`;
+            const urgent = data.items.filter(i => i.level === 'urgent');
+            const watch = data.items.filter(i => i.level === 'watch');
+            urgent.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+            watch.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+
+            let report = '';
+            if (urgent.length > 0) {
+                report += `🔴 <b>【緊急補貨 - 庫存不足 ${leadDaysText}】</b>\n`;
+                urgent.slice(0, 15).forEach((i) => {
+                    report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
+                    if (i.lowWater !== null) {
+                        report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 低水位：${i.lowWater}\n`;
+                        report += `  ⏰ 預估僅剩 <b>${i.daysLeft} 工作天</b> 存量\n\n`;
+                    } else {
+                        report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} （無出貨紀錄，庫存偏低）\n\n`;
+                    }
+                });
+                if (urgent.length > 15) report += `  <i>...還有 ${urgent.length - 15} 筆緊急品項</i>\n`;
+                report += `-----------------------------------\n\n`;
+            }
+
+            if (watch.length > 0) {
+                report += `🟡 <b>【需關注 - 庫存約 ${leadDaysText}~30 天】</b>\n`;
+                watch.slice(0, 10).forEach((i) => {
+                    report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
+                    report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 預估剩 <b>${i.daysLeft} 天</b>\n\n`;
+                });
+                if (watch.length > 10) report += `  <i>...還有 ${watch.length - 10} 筆需關注品項</i>\n`;
+                report += `-----------------------------------\n\n`;
+            }
+            reportText = report;
+        }
+
+        if (reportText) {
+            reply += reportText;
         }
 
         if (reply === '') {
             if (isFirstRun) {
-                reply = `✅ <b>智慧庫存系統初始化完成 (${timeStr})</b>\n\n目前所有商品庫存均高於安全水位（補貨週期 ${leadDays} 工作天）。\n已建立庫存對照快照，後續將即時偵測斷貨。`;
+                reply = `✅ <b>智慧庫存系統初始化完成 (${timeStr})</b>\n\n目前所有商品庫存均高於安全水位（補貨週期 ${data.meta.leadDays || 7} 工作天）。\n已建立庫存對照快照，後續將即時偵測斷貨。`;
             } else {
                 console.log('[排程] 今日無缺貨商品且庫存充裕，不發送 Telegram 訊息。');
                 return;
             }
         } else {
-            const totalAlert = urgentCount + watchCount;
-            reply = `🔔 <b>智慧庫存低水位日報 (${timeStr})</b>\n📊 補貨週期：${leadDays} 工作天 | 🔴 緊急：${urgentCount} 項 | 🟡 關注：${watchCount} 項\n\n` + reply;
+            const urgentCount = data.meta.urgentCount;
+            const watchCount = data.meta.watchCount;
+            reply = `🔔 <b>智慧庫存低水位日報 (${timeStr})</b>\n📊 補貨週期：${data.meta.leadDays || 7} 工作天 | 🔴 緊急：${urgentCount} 項 | 🟡 關注：${watchCount} 項\n\n` + reply;
         }
 
         for (const bot of pushBots) {
