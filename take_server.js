@@ -168,7 +168,27 @@ function readStockDb(dbPath, keyword = null) {
         throw new Error(`找不到資料庫檔案: ${dbPath}`);
     }
     
-    const fileBuffer = fs.readFileSync(dbPath);
+    let fileBuffer;
+    let retries = 3;
+    let delay = 150; // 毫秒
+    
+    while (retries > 0) {
+        try {
+            fileBuffer = fs.readFileSync(dbPath);
+            break;
+        } catch (err) {
+            retries--;
+            if (retries === 0) {
+                console.error(`[資料庫] 讀取資料庫失敗，已達最大重試次數: ${err.message}`);
+                throw err;
+            }
+            console.warn(`[資料庫] 讀取資料庫被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
+            // 同步等待 delay ms
+            const start = Date.now();
+            while (Date.now() - start < delay) {}
+        }
+    }
+    
     const recordCount = fileBuffer.readInt32LE(4);
     const headerLength = fileBuffer.readInt16LE(8);
     const recordLength = fileBuffer.readInt16LE(10);
@@ -347,7 +367,28 @@ function sendTelegramMessage(token, chatId, text) {
 function queryDbfSimple(dbPath, filterFn, fieldsNeeded) {
     // 精簡版 DBF 掃描器（供 take_server.js 內部使用，不依賴 queryDbfOptimized）
     if (!fs.existsSync(dbPath)) return;
-    const buf = fs.readFileSync(dbPath);
+    
+    let buf;
+    let retries = 3;
+    let delay = 150; // 毫秒
+    
+    while (retries > 0) {
+        try {
+            buf = fs.readFileSync(dbPath);
+            break;
+        } catch (err) {
+            retries--;
+            if (retries === 0) {
+                console.error(`[資料庫] 掃描讀取資料庫失敗，已達最大重試次數: ${err.message}`);
+                throw err;
+            }
+            console.warn(`[資料庫] 掃描讀取資料庫被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
+            // 同步等待 delay ms
+            const start = Date.now();
+            while (Date.now() - start < delay) {}
+        }
+    }
+    
     const recordCount = buf.readInt32LE(4);
     const headerLen   = buf.readInt16LE(8);
     const recordLen   = buf.readInt16LE(10);

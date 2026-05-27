@@ -1,22 +1,51 @@
-﻿// Main Mobile UI Logic for ERP_Take
+// Main Mobile UI Logic for ERP_Take
 document.addEventListener('DOMContentLoaded', () => {
-    // 解析網址上的 token 金鑰並存入暫存
+    // 解析網址上的 token 金鑰並存入暫存 (改用 localStorage 以便在 Webview/重新整理時持久化)
     const urlParams = new URLSearchParams(window.location.search);
     const token = urlParams.get('token');
     if (token) {
-        sessionStorage.setItem('api_token', token);
+        localStorage.setItem('api_token', token);
         // 清除網址列上的 token 以免被截圖或看見
         window.history.replaceState({}, document.title, window.location.pathname);
     }
 
     // 封裝自帶 Token 驗證的 API 請求輔助函數
     function apiFetch(url, options = {}) {
-        const cachedToken = sessionStorage.getItem('api_token') || '';
+        const cachedToken = localStorage.getItem('api_token') || '';
         if (!options.headers) {
             options.headers = {};
         }
         options.headers['x-api-token'] = cachedToken;
         return fetch(url, options);
+    }
+
+    // 檢查 API 響應，非 ok 時解析詳細錯誤訊息
+    async function checkResponse(res) {
+        if (res.ok) return res;
+        
+        let errorDetail = '';
+        try {
+            const data = await res.json();
+            if (data && data.error) {
+                errorDetail = data.error;
+            }
+        } catch (e) {
+            try {
+                const text = await res.text();
+                if (text) errorDetail = text;
+            } catch (e2) {}
+        }
+        
+        let fullMsg = `HTTP ${res.status}`;
+        if (errorDetail) {
+            fullMsg += ` (${errorDetail})`;
+        }
+        
+        if (res.status === 401) {
+            fullMsg += '\n\n【提示】安全驗證金鑰已過期或不正確，請在 Telegram 隨身查 Bot 中輸入「盤點」以重新取得最新連結。';
+        }
+        
+        throw new Error(fullMsg);
     }
 
     // State management
@@ -86,14 +115,14 @@ document.addEventListener('DOMContentLoaded', () => {
     async function fetchSuppliers() {
         try {
             const res = await apiFetch('/api/suppliers');
-            if (!res.ok) throw new Error('無法取得廠商列表');
+            await checkResponse(res);
             suppliersList = await res.json();
             
             // 渲染全體廠商名單到下拉選單
             renderSuppliersDropdown(suppliersList);
         } catch (err) {
             alert('載入廠商錯誤: ' + err.message);
-            supplierDropdownList.innerHTML = '<li class="dropdown-placeholder text-danger">載入失敗，請重試</li>';
+            supplierDropdownList.innerHTML = `<li class="dropdown-placeholder text-danger">載入失敗: ${err.message}</li>`;
         }
     }
 
@@ -214,7 +243,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         try {
             const res = await apiFetch(`/api/products?supplier=${encodeURIComponent(activeSupplier)}`);
-            if (!res.ok) throw new Error('無法載入該廠商之商品');
+            await checkResponse(res);
             productsList = await res.json();
             
             checklistLoading.classList.add('hidden');
@@ -535,7 +564,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 return;
             }
-            if (!res.ok) throw new Error('掃描查詢失敗');
+            await checkResponse(res);
             
             const product = await res.json();
             
@@ -598,7 +627,7 @@ document.addEventListener('DOMContentLoaded', () => {
         forceSearchResults.innerHTML = '';
         try {
             const res = await apiFetch(`/api/products?q=${encodeURIComponent(query)}`);
-            if (!res.ok) throw new Error('搜尋商品失敗');
+            await checkResponse(res);
             const list = await res.json();
             
             forceLoading.classList.add('hidden');
@@ -686,7 +715,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify(payload)
             });
 
-            if (!res.ok) throw new Error('伺服器寫入失敗');
+            await checkResponse(res);
             
             alert(`🎉 上傳成功！已將 ${itemsToUpload.length} 筆項目同步至 ERP 中。\n請在 ERP 系統中確認該日期的盤點單！`);
             
