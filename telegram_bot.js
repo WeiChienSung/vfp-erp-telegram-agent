@@ -117,37 +117,57 @@ function sleepSync(ms) {
     }
 }
 
-function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThreshold = 5) {
+// 全域商品資料快取
+let stockCache = {
+    dbPath: '',
+    mtimeMs: 0,
+    records: [],
+    fields: []
+};
+
+/**
+ * 取得最新商品紀錄（含記憶體快取與增量更新機制）
+ * 避免每次查詢都重複執行檔案 I/O、Big5 解碼與欄位解析
+ */
+function getStockRecords(dbPath) {
     if (!fs.existsSync(dbPath)) {
         throw new Error(`找不到資料庫檔案: ${dbPath}`);
     }
     
+    const stat = fs.statSync(dbPath);
+    const mtimeMs = stat.mtime.getTime();
+    
+    // 若路徑相同且修改時間未變，直接回傳記憶體快取，效能提升數百倍
+    if (stockCache.dbPath === dbPath && stockCache.mtimeMs === mtimeMs && stockCache.records.length > 0) {
+        return stockCache.records;
+    }
+    
+    console.log(`[快取系統] 偵測到資料庫變更或尚未載入，開始重建商品快取...`);
+    const start = Date.now();
+    
     let fileBuffer;
     let retries = 3;
-    let delay = 150; // 毫秒
-    
+    let delay = 150;
     while (retries > 0) {
         try {
             fileBuffer = fs.readFileSync(dbPath);
             break;
         } catch (err) {
             retries--;
-            if (retries === 0) {
-                console.error(`[資料庫] Bot 讀取資料庫失敗，已達最大重試次數: ${err.message}`);
-                throw err;
-            }
-            console.warn(`[資料庫] Bot 讀取資料庫被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
+            if (retries === 0) throw err;
+            console.warn(`[資料庫] 快取載入忙碌，將於 ${delay}ms 後重試...`);
             sleepSync(delay);
         }
     }
+    
     const recordCount = fileBuffer.readInt32LE(4);
     const headerLength = fileBuffer.readInt16LE(8);
     const recordLength = fileBuffer.readInt16LE(10);
-
+    
     const fields = [];
     let offset = 32;
     let currentRecordOffset = 1;
-
+    
     while (offset < headerLength - 1) {
         const fieldBuffer = fileBuffer.subarray(offset, offset + 32);
         if (fieldBuffer[0] === 0x0D) break;
@@ -156,7 +176,7 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
         const name = fieldBuffer.subarray(0, ne).toString('ascii').trim();
         const type = String.fromCharCode(fieldBuffer[11]);
         const len = fieldBuffer[16];
-
+        
         fields.push({
             name,
             type,
@@ -166,25 +186,27 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
         currentRecordOffset += len;
         offset += 32;
     }
-
+    
     const big5Decoder = new TextDecoder('big5');
-    const results = [];
-
+    const records = [];
+    
+    // 預先提取的必要欄位
+    const targetFields = [
+        'NO', 'NAME', 'UNIT', 'UNITS', 'SCAL', 'INVQT', 'INVQT1', 'INVQT0', 
+        'SAPRIT', 'SAPRI1', 'SAPRIA', 'SAPRITS', 'SAPRIS1', 'SAPRISA',
+        'SUNA', 'SUNO', 'BNO', 'BNO1', 'BNO2', 'SNO', 'PUPRI'
+    ];
+    
     for (let r = 0; r < recordCount; r++) {
         const filePos = headerLength + (r * recordLength);
         if (filePos + recordLength > fileBuffer.length) {
             console.warn(`[資料庫] 警告：讀取位置已超出檔案大小，終止於第 ${r} 筆記錄。`);
             break;
         }
-        if (fileBuffer[filePos] === 0x2A) continue;
-
+        if (fileBuffer[filePos] === 0x2A) continue; // 排除已刪除紀錄
+        
         const recordBuf = fileBuffer.subarray(filePos, filePos + recordLength);
         const record = {};
-        const targetFields = [
-            'NO', 'NAME', 'UNIT', 'UNITS', 'SCAL', 'INVQT', 'INVQT1', 'INVQT0', 
-            'SAPRIT', 'SAPRI1', 'SAPRIA', 'SAPRITS', 'SAPRIS1', 'SAPRISA',
-            'SUNA', 'SUNO', 'BNO', 'BNO1', 'BNO2', 'SNO', 'PUPRI'
-        ];
         
         for (const f of fields) {
             if (targetFields.includes(f.name)) {
@@ -198,191 +220,171 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
                 }
             }
         }
-
+        
         if (!record['NO']) continue;
-
+        
         if (record['NAME']) {
             record['NAME'] = record['NAME'].replace(/\*+$/, '').trim();
         }
         if (record['UNIT']) {
             record['UNIT'] = record['UNIT'].trim();
         }
-
+        
+        // 預算搜尋優化欄位，避免每次查詢重複執行字串標準化
         const nameStr = record['NAME'] || '';
-        const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
+        const nameClean = nameStr.replace(/\b\d{2,3}\.\d{2}\.\d{2}\b/g, '');
+        const normName = normalizeText(nameClean);
+        const nameSpaced = normName.replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ');
+        const nameCompact = normName.replace(/\s+/g, '');
+        
+        const normNo = normalizeText(record['NO']);
+        const normBno = normalizeText(record['BNO']);
+        const normBno1 = normalizeText(record['BNO1']);
+        
+        record._searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
+        record._normName = normName;
+        record._nameCompact = nameCompact;
+        record._normNo = normNo;
+        record._normBno = normBno;
+        record._normBno1 = normBno1;
+        record._isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
+        
+        records.push(record);
+    }
+    
+    stockCache = {
+        dbPath,
+        mtimeMs,
+        records,
+        fields
+    };
+    
+    console.log(`[快取系統] 快取重建完成，共載入 ${records.length} 筆商品紀錄。耗時: ${Date.now() - start}ms`);
+    return records;
+}
 
-        if (lowStockOnly) {
-            if (!isStopped && record['INVQT'] <= lowStockThreshold) {
-                results.push(record);
-            }
-        } else if (keyword) {
-            // 1. 去除建檔/調價日期後綴 (YY.MM.DD 或 YYY.MM.DD)
-            const nameClean = nameStr.replace(/\b\d{2,3}\.\d{2}\.\d{2}\b/g, '');
-            
-            // 2. 建立此商品的「分詞版」與「緊湊版」搜尋鍵
-            const normName = normalizeText(nameClean);
-            const nameSpaced = normName.replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ');
-            const nameCompact = normName.replace(/\s+/g, '');
-            
-            const normNo = normalizeText(record['NO']);
-            const normBno = normalizeText(record['BNO']);
-            const normBno1 = normalizeText(record['BNO1']);
-            
-            // 搜尋鍵包含：分詞、緊湊、品號、條碼
-            const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
-            
-            // 3. 將使用者的關鍵字做智慧拆分與搜尋權重排序
-            let cleanQuery = normalizeText(keyword.trim());
-            let initialParts = cleanQuery
-                .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
-                .split(/[\s　]+/)
-                .filter(t => t.length > 0);
-            
-            let queryTokens = [];
-            for (const part of initialParts) {
-                const hasChinese = /[\u4e00-\u9fa5]/.test(part);
-                const hasAlphanumeric = /[a-z0-9]/.test(part);
-                
-                if (hasChinese && !hasAlphanumeric) {
-                    // 純中文 (如 "酒精", "針頭") -> 保留完整詞彙
-                    queryTokens.push(part);
-                } else {
-                    // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 在中文與英數字邊界上拆分
-                    // 保留英數字組合 (e.g. "3m" 保持為 "3m"，且中文部分保持連貫，加上 + 號)
-                    const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]+/gi;
-                    let match;
-                    while ((match = regex.exec(part)) !== null) {
-                        queryTokens.push(match[0].toLowerCase());
-                    }
-                }
-            }
-            queryTokens = Array.from(new Set(queryTokens));
-            
-            let score = 0;
-            const compactQuery = cleanQuery.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】]/g, '');
-            
-            // 優先級 1：緊湊字串完全匹配 (如 "3m1吋膚" -> "3m通氣紙膠膚色1吋") -> 滿分 100
-            if (nameCompact.includes(compactQuery) || normNo.includes(compactQuery) || normBno.includes(compactQuery) || normBno1.includes(compactQuery)) {
-                score = 100;
-                // 額外給予短品名密度獎勵 (最大 +9 分)，避免長品名蓋過短品名
-                score += Math.max(0, 9 - Math.floor(nameStr.length / 5));
-            } else if (queryTokens.length > 0) {
-                // 優先級 2：分詞 AND 匹配 -> 動態打分 (10 ~ 85 分)
-                const matchesAll = queryTokens.every(token => searchKey.includes(token));
-                if (matchesAll) {
-                    score = 10;
-                    
-                    // 檢查是否在品名中按順序連續出現 (若按順序出現則大幅加分)
-                    let lastIndex = -1;
-                    let isOrdered = true;
-                    let firstMatchPos = -1;
-                    let lastMatchPos = -1;
-                    
-                    for (const token of queryTokens) {
-                        const idx = normName.indexOf(token);
-                        if (idx === -1) {
-                            isOrdered = false;
-                            break;
-                        }
-                        if (idx < lastIndex) {
-                            isOrdered = false;
-                        }
-                        lastIndex = idx;
-                        
-                        if (firstMatchPos === -1) firstMatchPos = idx;
-                        lastMatchPos = idx + token.length;
-                    }
-                    
-                    if (isOrdered) {
-                        // 順序正確：給予 70 分基礎分
-                        score = 70;
-                        // 距離越緊湊，加分越多 (夾雜字元越少越好)
-                        const span = lastMatchPos - firstMatchPos;
-                        const excess = span - queryTokens.reduce((sum, t) => sum + t.length, 0);
-                        score += Math.max(0, 15 - excess); // 緊湊度加分，最高 +15 分
-                    } else {
-                        // 順序錯亂：給予 15 分基礎分
-                        score = 15;
-                    }
-                    
-                    // 短品名長度密度獎勵 (最高 +10 分)
-                    score += Math.max(0, 10 - Math.floor(nameStr.length / 4));
-                }
-            }
-            
-            if (score > 0) {
-                record._score = score;
-                results.push(record);
-            }
+/**
+ * 查詢商品庫
+ */
+function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThreshold = 5) {
+    const allRecords = getStockRecords(dbPath);
+    
+    if (lowStockOnly) {
+        return allRecords.filter(record => !record._isStopped && record['INVQT'] <= lowStockThreshold);
+    }
+    
+    if (!keyword) {
+        return allRecords;
+    }
+    
+    const results = [];
+    
+    // 🛡️ 防禦性設計：限制關鍵字最大長度，防止惡意長字串攻擊
+    const maxKeywordLength = 100;
+    let cleanQuery = normalizeText(keyword.substring(0, maxKeywordLength).trim());
+    
+    let initialParts = cleanQuery
+        .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
+        .split(/[\s　]+/)
+        .filter(t => t.length > 0);
+    
+    let queryTokens = [];
+    for (const part of initialParts) {
+        const hasChinese = /[\u4e00-\u9fa5]/.test(part);
+        const hasAlphanumeric = /[a-z0-9]/.test(part);
+        
+        if (hasChinese && !hasAlphanumeric) {
+            queryTokens.push(part);
         } else {
-            results.push(record);
+            const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]+/gi;
+            let match;
+            let safetyCounter = 0;
+            // 🛡️ 防禦性設計：限制分詞掃描次數上限，防範死循環
+            while ((match = regex.exec(part)) !== null && safetyCounter++ < 50) {
+                queryTokens.push(match[0].toLowerCase());
+            }
+        }
+    }
+    queryTokens = Array.from(new Set(queryTokens));
+    
+    const compactQuery = cleanQuery.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】]/g, '');
+    
+    for (let i = 0; i < allRecords.length; i++) {
+        const record = allRecords[i];
+        let score = 0;
+        
+        const nameCompact = record._nameCompact;
+        const normNo = record._normNo;
+        const normBno = record._normBno;
+        const normBno1 = record._normBno1;
+        const searchKey = record._searchKey;
+        const normName = record._normName;
+        const nameStr = record['NAME'] || '';
+        
+        // 優先級 1：緊湊字串完全匹配 -> 滿分 100
+        if (nameCompact.includes(compactQuery) || normNo.includes(compactQuery) || normBno.includes(compactQuery) || normBno1.includes(compactQuery)) {
+            score = 100;
+            // 額外給予短品名密度獎勵 (最大 +9 分)，避免長品名蓋過短品名
+            score += Math.max(0, 9 - Math.floor(nameStr.length / 5));
+        } else if (queryTokens.length > 0) {
+            // 優先級 2：分詞 AND 匹配 -> 動態打分 (10 ~ 85 分)
+            const matchesAll = queryTokens.every(token => searchKey.includes(token));
+            if (matchesAll) {
+                score = 10;
+                
+                // 檢查是否在品名中按順序連續出現 (精確順序匹配)
+                let isOrdered = true;
+                let firstMatchPos = -1;
+                let lastMatchPos = -1;
+                let searchFrom = 0;
+                
+                for (const token of queryTokens) {
+                    const idx = normName.indexOf(token, searchFrom);
+                    if (idx === -1) {
+                        isOrdered = false;
+                        break;
+                    }
+                    if (firstMatchPos === -1) firstMatchPos = idx;
+                    lastMatchPos = idx + token.length;
+                    searchFrom = lastMatchPos;
+                }
+                
+                if (isOrdered) {
+                    score = 70;
+                    // 距離越緊湊，加分越多 (夾雜字元越少越好)
+                    const span = lastMatchPos - firstMatchPos;
+                    const tokenLenSum = queryTokens.reduce((sum, t) => sum + t.length, 0);
+                    const excess = Math.max(0, span - tokenLenSum);
+                    score += Math.max(0, 15 - excess); // 緊湊度加分，最高 +15 分
+                } else {
+                    score = 15;
+                }
+                
+                // 短品名長度密度獎勵 (最高 +10 分)
+                score += Math.max(0, 10 - Math.floor(nameStr.length / 4));
+            }
+        }
+        
+        if (score > 0) {
+            // 🛡️ 防禦性設計：複製 record 以避免對快取中的原始資料進行屬性污染
+            const matchedRecord = Object.assign({}, record);
+            matchedRecord._score = score;
+            results.push(matchedRecord);
         }
     }
     
-    if (keyword) {
-        results.sort((a, b) => b._score - a._score);
-    }
-    
+    results.sort((a, b) => b._score - a._score);
     return results;
 }
 
 /**
  * 預檢商品基本庫 (stock.DBF)，確認是否存在至少一個商品同時符合所有關鍵字 (AND 關係)。
- * 採用單次 I/O 讀取、精簡欄位解析與 Early Return (快速返回) 機制，確保最高效能。
- * @param {string} dbPath - stock.DBF 檔案路徑
- * @param {string[]} productKeywords - 商品關鍵字陣列
- * @returns {boolean} 是否存在至少一個符合的商品
+ * 基於記憶體快取與 Early Return 機制，實現微秒級的檢測響應。
  */
 function checkProductKeywordsExist(dbPath, productKeywords) {
     if (!productKeywords || productKeywords.length === 0) return false;
     
-    if (!fs.existsSync(dbPath)) {
-        throw new Error(`找不到資料庫檔案: ${dbPath}`);
-    }
-    
-    let fileBuffer;
-    let retries = 3;
-    let delay = 150;
-    
-    while (retries > 0) {
-        try {
-            fileBuffer = fs.readFileSync(dbPath);
-            break;
-        } catch (err) {
-            retries--;
-            if (retries === 0) throw err;
-            sleepSync(delay);
-        }
-    }
-    
-    const recordCount = fileBuffer.readInt32LE(4);
-    const headerLength = fileBuffer.readInt16LE(8);
-    const recordLength = fileBuffer.readInt16LE(10);
-    
-    const fields = [];
-    let offset = 32;
-    let currentRecordOffset = 1;
-    
-    while (offset < headerLength - 1) {
-        const fieldBuffer = fileBuffer.subarray(offset, offset + 32);
-        if (fieldBuffer[0] === 0x0D) break;
-        let ne = 0;
-        while (ne < 11 && fieldBuffer[ne] !== 0) ne++;
-        const name = fieldBuffer.subarray(0, ne).toString('ascii').trim();
-        const type = String.fromCharCode(fieldBuffer[11]);
-        const len = fieldBuffer[16];
-        
-        fields.push({
-            name,
-            type,
-            length: len,
-            offset: currentRecordOffset
-        });
-        currentRecordOffset += len;
-        offset += 32;
-    }
-    
-    const big5Decoder = new TextDecoder('big5');
+    const allRecords = getStockRecords(dbPath);
     
     // 預先標準化所有關鍵字，避免在迴圈內重複處理
     const normKeywords = productKeywords.map(kw => {
@@ -400,10 +402,10 @@ function checkProductKeywordsExist(dbPath, productKeywords) {
             if (hasChinese && !hasAlphanumeric) {
                 queryTokens.push(part);
             } else {
-                // 同步加上 + 號，確保 checkProductKeywordsExist 預檢行為與實際搜尋一致！
                 const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]+/gi;
                 let match;
-                while ((match = regex.exec(part)) !== null) {
+                let safetyCounter = 0;
+                while ((match = regex.exec(part)) !== null && safetyCounter++ < 50) {
                     queryTokens.push(match[0].toLowerCase());
                 }
             }
@@ -414,52 +416,25 @@ function checkProductKeywordsExist(dbPath, productKeywords) {
         };
     });
     
-    for (let r = 0; r < recordCount; r++) {
-        const filePos = headerLength + (r * recordLength);
-        if (filePos + recordLength > fileBuffer.length) break;
-        if (fileBuffer[filePos] === 0x2A) continue; // 排除已刪除紀錄
+    for (let r = 0; r < allRecords.length; r++) {
+        const record = allRecords[r];
         
-        const recordBuf = fileBuffer.subarray(filePos, filePos + recordLength);
-        const record = {};
+        const nameCompact = record._nameCompact;
+        const normNo = record._normNo;
+        const normBno = record._normBno;
+        const normBno1 = record._normBno1;
+        const searchKey = record._searchKey;
         
-        // 關鍵優化：僅提取匹配必須的 4 個欄位，其餘 10 多個欄位不進行解碼與數值轉換，節省大量 CPU
-        const targetFields = ['NO', 'NAME', 'BNO', 'BNO1'];
-        for (const f of fields) {
-            if (targetFields.includes(f.name)) {
-                const rawVal = recordBuf.subarray(f.offset, f.offset + f.length);
-                let end = rawVal.length;
-                while (end > 0 && (rawVal[end - 1] === 0x20 || rawVal[end - 1] === 0x00)) end--;
-                record[f.name] = big5Decoder.decode(rawVal.subarray(0, end));
-            }
-        }
-        
-        if (!record['NO']) continue;
-        
-        const nameStr = record['NAME'] || '';
-        const nameClean = nameStr.replace(/\b\d{2,3}\.\d{2}\.\d{2}\b/g, '');
-        const normName = normalizeText(nameClean);
-        const nameSpaced = normName.replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ');
-        const nameCompact = normName.replace(/\s+/g, '');
-        
-        const normNo = normalizeText(record['NO']);
-        const normBno = normalizeText(record['BNO']);
-        const normBno1 = normalizeText(record['BNO1']);
-        
-        const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
-        
-        // 核心邏輯優化：確認該商品是否同時符合所有關鍵字條件 (AND 關係)
         let matchAllKeywords = true;
         for (const nk of normKeywords) {
-            let score = 0;
+            let matches = false;
             if (nameCompact.includes(nk.compact) || normNo.includes(nk.compact) || normBno.includes(nk.compact) || normBno1.includes(nk.compact)) {
-                score = 100;
+                matches = true;
             } else if (nk.tokens.length > 0) {
-                const matchesAll = nk.tokens.every(token => searchKey.includes(token));
-                if (matchesAll) {
-                    score = 10;
-                }
+                matches = nk.tokens.every(token => searchKey.includes(token));
             }
-            if (score === 0) {
+            
+            if (!matches) {
                 matchAllKeywords = false;
                 break;
             }
