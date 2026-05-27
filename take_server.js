@@ -4,6 +4,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { Worker } = require('worker_threads');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const ACTIVE_URL_PATH = path.join(__dirname, '..', 'active_url.txt');
@@ -45,6 +46,13 @@ function loadConfig() {
                 saveConfig();
                 console.log(`[系統] 偵測到未設定 API 金鑰，已自動生成密碼學安全鎖金鑰。`);
             }
+            
+            // 檢查是否設定了固定穿透子網域，若無則自動分配
+            if (!config.subdomain) {
+                config.subdomain = "nmedi-erp-take";
+                saveConfig();
+                console.log(`[系統] 已自動初始化固定穿透子網域: ${config.subdomain}`);
+            }
         }
     } catch (e) {
         console.error('[錯誤] 載入設定檔失敗:', e.message);
@@ -57,23 +65,43 @@ let forecastCacheTime = 0;
 const FORECAST_CACHE_MS = 5 * 60 * 1000; // 快取 5 分鐘
 let isCalculatingForecastBackground = false;
 
-// 背景自動重新整理快取
+// 背景自動重新整理快取 (使用 Worker Thread 進行物理隔離運算，防止同步 DBF 讀取阻塞主 Event Loop 導致 502 Bad Gateway)
 function refreshForecastCacheBackground() {
     if (isCalculatingForecastBackground) return;
     isCalculatingForecastBackground = true;
-    console.log('[背景快取] 開始在背景重新計算庫存預測...');
+    console.log('[背景快取] 啟動獨立工作線程 (Worker Thread) 計算庫存預測...');
+
+    const start = Date.now();
     
-    setImmediate(() => {
-        try {
-            const start = Date.now();
-            const result = calcForecastData();
-            forecastCache = result;
+    // 建立背景工作線程，傳送計算所需的設定參數
+    const worker = new Worker(path.join(__dirname, 'forecast_worker.js'), {
+        workerData: {
+            databasePath: config.databasePath,
+            lowStockLeadTimeDays: config.lowStockLeadTimeDays,
+            lowStockFallback: config.lowStockFallback,
+            lowStockMin2YearSales: config.lowStockMin2YearSales,
+            priorityProducts: config.priorityProducts
+        }
+    });
+
+    worker.on('message', (message) => {
+        if (message.success) {
+            forecastCache = message.data;
             forecastCacheTime = Date.now();
-            console.log(`[背景快取] 計算完成。耗時 ${Date.now() - start} ms。活躍品項: ${result.meta.totalActive}`);
-        } catch (e) {
-            console.error('[背景快取] 計算失敗:', e.message);
-        } finally {
-            isCalculatingForecastBackground = false;
+            console.log(`[背景快取] 計算完成。耗時 ${Date.now() - start} ms。活躍品項: ${forecastCache.meta.totalActive}`);
+        } else {
+            console.error('[背景快取] 計算出錯:', message.error);
+        }
+    });
+
+    worker.on('error', (err) => {
+        console.error('[背景快取] 工作線程發生未捕獲異常:', err.message);
+    });
+
+    worker.on('exit', (code) => {
+        isCalculatingForecastBackground = false;
+        if (code !== 0) {
+            console.error(`[背景快取] 工作線程異常退出，代碼: ${code}`);
         }
     });
 }
@@ -534,8 +562,10 @@ function calcForecastData() {
 let tunnelUrl = '';
 
 function startTunnel() {
-    console.log('[系統] 正在建立 Localtunnel 安全加密通道...');
-    const lt = spawn('npx.cmd', ['localtunnel', '--port', '3000'], { shell: true });
+    const subdomainVal = config.subdomain || "nmedi-erp-take";
+    console.log(`[系統] 正在建立 Localtunnel 安全加密通道 (固定子網域: ${subdomainVal})...`);
+    
+    const lt = spawn('npx.cmd', ['localtunnel', '--port', '3000', '--subdomain', subdomainVal], { shell: true });
     
     lt.stdout.on('data', (data) => {
         const text = data.toString();
@@ -544,6 +574,12 @@ function startTunnel() {
             const match = text.match(/https:\/\/[^\s]+/);
             if (match) {
                 const baseTunnelUrl = match[0].trim();
+                
+                // 檢查實際獲取的子網域是否相符，防範被他人佔用時被指派為其他隨機域名
+                if (!baseTunnelUrl.includes(subdomainVal)) {
+                    console.warn(`[Localtunnel 警告] 要求的子網域 "${subdomainVal}" 被佔用或不可用，實際分配的網址為: ${baseTunnelUrl}`);
+                }
+                
                 // 加上金鑰 Token
                 tunnelUrl = `${baseTunnelUrl}?token=${config.apiToken}`;
                 console.log(`[系統] 行動盤點安全網址已建立 (已附加金鑰): ${tunnelUrl}`);
