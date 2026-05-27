@@ -300,10 +300,10 @@ fs.watch(OUTBOX_PATH, (event, filename) => {
         checkOutbox();
     }
 });
-
 // 啟動
 console.log('=============================================');
 console.log('      Antigravity Telegram Bridge 啟動      ');
 console.log(`      連線 Bot: @agy_assistant_helper_bot   `);
 console.log('=============================================');
+checkOutbox();
 getUpdates();
