@@ -13,19 +13,32 @@ const CONFIG_PATH = path.join(__dirname, 'config.json');
  * @param {number} timeoutMs - 超時限制時間 (毫秒)
  */
 async function verifyDatabasePath(filePath, timeoutMs = 2500) {
+    let timeoutId;
+    
     const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => {
+        timeoutId = setTimeout(() => {
             reject(new Error(`檢測資料庫路徑逾時 (${timeoutMs}ms)，請確認網路共用磁碟已連線、IP 正確且無防火牆阻擋。`));
         }, timeoutMs);
     });
 
-    const accessPromise = fsPromises.access(filePath, fs.constants.F_OK)
-        .then(() => true)
-        .catch(() => false);
+    const accessPromise = (async () => {
+        try {
+            await fsPromises.access(filePath, fs.constants.F_OK);
+            return true;
+        } catch {
+            return false;
+        }
+    })();
 
-    const exists = await Promise.race([accessPromise, timeoutPromise]);
-    if (!exists) {
-        throw new Error(`找不到您輸入的資料庫檔案，請確認路徑是否正確或是否有權限讀取。`);
+    try {
+        const exists = await Promise.race([accessPromise, timeoutPromise]);
+        if (!exists) {
+            throw new Error(`找不到您輸入的資料庫檔案，請確認路徑是否正確或是否有權限讀取。`);
+        }
+    } finally {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
     }
 }
 

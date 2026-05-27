@@ -139,7 +139,7 @@ function getStockRecords(dbPath) {
     while (retries > 0) {
         try {
             if (!fs.existsSync(dbPath)) {
-                throw new Error(`找不到資料庫檔案: ${dbPath}`);
+                throw Object.assign(new Error(`找不到資料庫檔案: ${dbPath}`), { code: 'ENOENT' });
             }
             stat = fs.statSync(dbPath);
             mtimeMs = stat.mtime.getTime();
@@ -153,11 +153,11 @@ function getStockRecords(dbPath) {
             break;
         } catch (err) {
             retries--;
-            if (retries === 0) {
-                console.error(`[資料庫] 載入商品庫失敗，已達最大重試次數: ${err.message}`);
+            if (err.code === 'ENOENT' || retries === 0) {
+                console.error(`[資料庫] 載入商品庫失敗: ${err.message}`);
                 throw err;
             }
-            console.warn(`[資料庫] 商品庫載入忙碌或網路抖動，將於 ${delay}ms 後重試...`);
+            console.warn(`[資料庫] 商品庫載入忙碌（鎖定），將於 ${delay}ms 後進行第 ${3 - retries} 次重試...`);
             sleepSync(delay);
         }
     }
@@ -725,7 +725,7 @@ function getCustomerRecords(dbPath) {
     while (retries > 0) {
         try {
             if (!fs.existsSync(dbPath)) {
-                throw new Error(`找不到資料庫檔案: ${dbPath}`);
+                throw Object.assign(new Error(`找不到資料庫檔案: ${dbPath}`), { code: 'ENOENT' });
             }
             stat = fs.statSync(dbPath);
             mtimeMs = stat.mtime.getTime();
@@ -739,11 +739,11 @@ function getCustomerRecords(dbPath) {
             break;
         } catch (err) {
             retries--;
-            if (retries === 0) {
-                console.error(`[資料庫] 載入客戶庫失敗，已達最大重試次數: ${err.message}`);
+            if (err.code === 'ENOENT' || retries === 0) {
+                console.error(`[資料庫] 載入客戶庫失敗: ${err.message}`);
                 throw err;
             }
-            console.warn(`[資料庫] 客戶庫載入忙碌或網路抖動，將於 ${delay}ms 後重試...`);
+            console.warn(`[資料庫] 客戶庫載入忙碌（鎖定），將於 ${delay}ms 後進行第 ${3 - retries} 次重試...`);
             sleepSync(delay);
         }
     }
