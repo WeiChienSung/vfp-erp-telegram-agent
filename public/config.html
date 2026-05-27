@@ -5,116 +5,62 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ERP 隨身助手 - 系統管理後台</title>
     <link rel="stylesheet" href="config.css">
+    <style>
+        /* 額外補強的單欄垂直機器人 Slots 列表樣式 */
+        .bots-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+        /* 將表單輸入與提示的佈局稍微美化 */
+        .form-group label {
+            font-weight: 600;
+            color: #fff;
+        }
+        .field-hint {
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+            margin-top: 0.5rem;
+            line-height: 1.4;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
         <!-- 頂部標題 -->
         <header>
             <div class="logo">🛠️ ERP 隨身助手 設定後台</div>
-            <div class="subtitle">本機安全管理系統 (僅限本機電腦 localhost 存取)</div>
+            <div class="subtitle">本機安全管理系統 (僅限本機電腦 localhost / 127.0.0.1 存取)</div>
         </header>
 
-        <!-- 設定區域 -->
+        <!-- 設定區域 (兩欄對稱佈局) -->
         <main class="grid">
-            <!-- 左側：系統基本設定與排程 -->
+            <!-- 左側：系統基本設定 -->
             <section class="card">
                 <h2>📦 系統基本設定</h2>
+                <p class="description">在此設定 ERP 的 VFP 資料庫 UNC 連接路徑。修改後將即時生效。</p>
                 
                 <div class="form-group">
-                    <label for="databasePath">Visual FoxPro DBF 資料庫路徑</label>
+                    <label for="databasePath">Visual FoxPro DBF 資料庫路徑 (ReadOnly)</label>
                     <input type="text" id="databasePath" placeholder="例如: \\192.168.1.99\d\nmedi\stock.DBF">
-                </div>
-
-                <div class="form-group">
-                    <label for="lowStockThreshold">日常低庫存警報水位 (目前數量以下觸發)</label>
-                    <div class="slider-container">
-                        <input type="range" id="lowStockThreshold" min="1" max="100" value="5">
-                        <span id="lowStockValue" class="badge">5</span>
-                    </div>
-                </div>
-
-                <h2>📊 智慧庫存預測設定</h2>
-                <div class="form-group">
-                    <label for="lowStockLeadTimeDays">補貨週期（工作天）</label>
-                    <div class="slider-container">
-                        <input type="range" id="lowStockLeadTimeDays" min="1" max="30" value="7">
-                        <span id="leadTimeDaysValue" class="badge">7</span>
-                    </div>
-                    <small class="field-hint">低水位 = 日均銷量 × 此天數。建議設 7（一般國內廠商）或 14~21（進口品）。</small>
-                </div>
-
-                <div class="form-group">
-                    <label for="lowStockFallback">新品預設安全水位（無銷售紀錄時使用）</label>
-                    <div class="slider-container">
-                        <input type="range" id="lowStockFallback" min="0" max="50" value="5">
-                        <span id="fallbackValue" class="badge">5</span>
-                    </div>
-                    <small class="field-hint">庫存 > 0 且 ≤ 此值的新品才會發出緊急預警（設為 0 代表新品完全不預警）。</small>
-                </div>
-
-                <div class="form-group">
-                    <label for="lowStockMin2YearSales">活躍商品銷量門檻（過去 2 年最低出貨量）</label>
-                    <div class="slider-container">
-                        <input type="range" id="lowStockMin2YearSales" min="0" max="50" value="5">
-                        <span id="min2YearSalesValue" class="badge">5</span>
-                    </div>
-                    <small class="field-hint">2 年內總出貨量低於此值的商品視為冷門品，不納入智慧預警（設為 0 代表全部商品都納入）。</small>
-                </div>
-
-                <div class="forecast-link-bar">
-                    <a href="/forecast" target="_blank" class="btn btn-forecast">📊 開啟庫存預測儀表板</a>
-                </div>
-
-                <h2>⏰ 每日缺貨定時推播排程</h2>
-                <div class="push-schedule-section">
-                    <div class="add-time-bar">
-                        <input type="time" id="newPushTime">
-                        <button type="button" class="btn btn-primary" onclick="addPushTime()">➕ 新增推播時間</button>
-                    </div>
-                    <div id="pushTimesList" class="badge-list">
-                        <!-- 動態生成時間標籤 -->
+                    <div class="field-hint">
+                        請輸入 ERP 資料庫伺服器的資料庫絕對路徑（UNC 共享路徑）。<br>
+                        本機查詢機器人會使用唯讀方式安全讀取商品與歷史銷貨明細。
                     </div>
                 </div>
             </section>
 
-            <!-- 右側：主力商品設定 (搜尋與管理) -->
+            <!-- 右側：機器人 Slot 配置列表 -->
             <section class="card">
-                <h2>🔴 主力警報商品管理 (Priority Products)</h2>
-                <p class="description">列在此清單的商品，在庫存預測儀表板中會標示 ⭐，方便快速識別。</p>
-                
-                <!-- 批次貼上品號 -->
-                <div class="form-group">
-                    <label for="priorityBulkInput">批次新增主力商品品號（用逗號或換行分隔）</label>
-                    <textarea id="priorityBulkInput" rows="3" placeholder="例:\nA001\nA002, B003\nC100"
-                        style="width:100%;font-family:monospace;font-size:0.9rem;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.05);color:inherit;resize:vertical;"></textarea>
-                    <button type="button" class="btn btn-secondary" onclick="bulkAddPriority()" style="margin-top:8px">➕ 批次新增</button>
-                </div>
-
-                <div class="search-bar">
-                    <input type="text" id="productSearchInput" placeholder="搜尋商品名稱、編號或條碼 (例: 酒精)">
-                    <button type="button" class="btn btn-secondary" onclick="searchProducts()">🔍 搜尋</button>
-                </div>
-
-                <div id="searchResults" class="search-results-list">
-                    <!-- 搜尋結果 -->
-                </div>
-
-                <h3>目前列管的主力商品清單 (<span id="priorityCount">0</span> 筆)</h3>
-                <div id="priorityProductsList" class="priority-list">
-                    <!-- 列管商品 -->
-                </div>
-            </section>
-
-            <!-- 底部/下方：動態機器人配置列表 -->
-            <section class="card full-width">
                 <div class="card-header-row">
                     <h2>🤖 機器人配置列表 (Bot Slots)</h2>
                     <button type="button" class="btn btn-primary" onclick="addBotSlot()">➕ 新增機器人</button>
                 </div>
-                <p class="description">您可以自訂多個機器人，並為每台機器人分配不同功能 (查價、盤點、庫存推播) 與授權對象。</p>
+                <p class="description">您可以自訂多個 Telegram 機器人，並為每台機器人分配不同的功能與授權聊天室。</p>
                 
-                <div id="botsContainer" class="bots-grid">
-                    <!-- 動態生成機器人卡片 -->
+                <div id="botsContainer" class="bots-list">
+                    <!-- 動態生成機器人卡片 (垂直單欄排列) -->
                 </div>
             </section>
         </main>
