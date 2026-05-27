@@ -747,11 +747,6 @@ function formatProductInfo(item) {
 function getBotKeyboard(botInstance) {
     const row1 = [];
     
-    // 只有在啟用 'take' (盤點) 功能時才顯示開始盤點按鈕
-    if (botInstance.features && botInstance.features.includes('take')) {
-        row1.push({"text": "📋 開始盤點"});
-    }
-    
     // 只有 BOT_1 (管理員機器人) 才顯示管理後台按鈕
     if (botInstance.name === 'BOT_1') {
         row1.push({"text": "⚙️ 管理後台"});
@@ -911,8 +906,6 @@ class TelegramBotInstance {
                     `🎉 <b>註冊成功！</b>\n\n本聊天室已成功加入「${this.name}」的授權清單。\n\n<b>🔍 啟用功能：</b>\n${this.features.map(f => {
                         if (f === 'query') return '• 價格與庫存查詢 🔍';
                         if (f === 'history') return '• 客戶歷史售價查詢 💰';
-                        if (f === 'take') return '• 行動盤點安全通道 📋';
-                        if (f === 'push') return '• 每日智慧缺貨日報 🔔';
                         return f;
                     }).join('\n')}\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。`,
                     myKeyboard
@@ -950,41 +943,7 @@ class TelegramBotInstance {
 
 
 
-        // 處理盤點網址指令 (從 active_url.txt 讀取)
-        if (text === '盤點' || text.toLowerCase() === '/take' || text === '📋 開始盤點') {
-            if (!this.features.includes('take')) {
-                console.log(`[訊息 - ${this.name}] 該機器人未啟用盤點功能，忽略該指令。`);
-                return;
-            }
-            if (fs.existsSync(ACTIVE_URL_PATH)) {
-                try {
-                    const currentUrl = fs.readFileSync(ACTIVE_URL_PATH, 'utf8').trim();
-                    if (currentUrl) {
-                        const inlineKeyboard = {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        "text": "🔗 點此開啟行動盤點網頁",
-                                        "url": currentUrl
-                                    }
-                                ]
-                            ]
-                        };
-                        sendTelegramMessage(
-                            this.token,
-                            chatId,
-                            `📋 <b>行動盤點助手網址已就緒：</b>\n\n請點擊下方按鈕開始盤點作業（支援手機掃描與離線存檔）：`,
-                            inlineKeyboard
-                        );
-                        return;
-                    }
-                } catch (e) {
-                    console.error('[錯誤] 讀取盤點網址暫存檔失敗:', e.message);
-                }
-            }
-            sendTelegramMessage(this.token, chatId, `⏳ <b>行動盤點助手目前未啟動。</b>\n請先啟動本機的「行動盤點助手」程式，或在幾秒鐘後重試。`, myKeyboard);
-            return;
-        }
+
 
         // 🛡️ 限流防刷限制 (1.5 秒限制 1 次商品/歷史價格查詢)
         const now = Date.now();
@@ -1154,7 +1113,7 @@ function reconcileBots() {
     for (const [token, instance] of activeBots.entries()) {
         const found = newBots.find(b => b.token === token);
         const features = found && found.features ? found.features : [];
-        if (!found || (!features.includes('query') && !features.includes('take') && !features.includes('history'))) {
+        if (!found || (!features.includes('query') && !features.includes('history'))) {
             console.log(`[系統] 停止機器人 [${instance.name}] 的輪詢服務`);
             instance.stop();
             activeBots.delete(token);
@@ -1166,7 +1125,7 @@ function reconcileBots() {
         if (!botConfig.token) continue;
         
         const features = botConfig.features || [];
-        const needsPolling = features.includes('query') || features.includes('take') || features.includes('history');
+        const needsPolling = features.includes('query') || features.includes('history');
         
         if (!needsPolling) {
             if (activeBots.has(botConfig.token)) {

@@ -1,24 +1,16 @@
-# 1. Force kill node processes on port 3000 and 28256
-$ports = @(3000, 28256)
-foreach ($port in $ports) {
-    $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-    foreach ($conn in $connections) {
-        if ($conn.OwningProcess) {
-            Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-            Write-Output "Stopped process $($conn.OwningProcess) on port $port"
-        }
+# 1. Force kill node processes on port 28256 (Bot Single Instance Lock)
+$port = 28256
+$connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
+foreach ($conn in $connections) {
+    if ($conn.OwningProcess) {
+        Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+        Write-Output "Stopped process $($conn.OwningProcess) on port $port"
     }
-}
-
-# 2. Clean up leftover localtunnel processes
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*localtunnel*" } | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
 Start-Sleep -Seconds 2
 
-# 3. Start Node services via cscript.exe wrappers to avoid Session 0 GUI restriction
-Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_take.vbs" -WindowStyle Hidden
+# 2. Start Node services via cscript.exe wrappers to avoid Session 0 GUI restriction
 Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_query.vbs" -WindowStyle Hidden
 
-Write-Output "Services restarted successfully (Take and Query only)."
+Write-Output "Services restarted successfully (Query Bot only)."
