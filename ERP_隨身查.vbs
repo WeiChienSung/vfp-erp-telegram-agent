@@ -2,7 +2,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 
 ' Use exact folder name to prevent multiple-match overwrite bug
 Dim exactPath
-exactPath = "C:\agy_Add_on\ERP " & Chr(38568) & Chr(36523) & Chr(26597) & Chr(33287) & Chr(30424) & Chr(40670)
+exactPath = "C:\agy_Add_on\ERP " & ChrW(38568) & ChrW(36523) & ChrW(26597) & ChrW(33287) & ChrW(30424) & ChrW(40670)
 
 ' Fallback: scan for first ERP subfolder if exact path not found
 If fso.FolderExists(exactPath) Then
