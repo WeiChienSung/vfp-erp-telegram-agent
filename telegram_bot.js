@@ -288,6 +288,153 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
     return results;
 }
 
+/**
+ * 預檢商品基本庫 (stock.DBF)，確認是否存在至少一個商品同時符合所有關鍵字 (AND 關係)。
+ * 採用單次 I/O 讀取、精簡欄位解析與 Early Return (快速返回) 機制，確保最高效能。
+ * @param {string} dbPath - stock.DBF 檔案路徑
+ * @param {string[]} productKeywords - 商品關鍵字陣列
+ * @returns {boolean} 是否存在至少一個符合的商品
+ */
+function checkProductKeywordsExist(dbPath, productKeywords) {
+    if (!productKeywords || productKeywords.length === 0) return false;
+    
+    if (!fs.existsSync(dbPath)) {
+        throw new Error(`找不到資料庫檔案: ${dbPath}`);
+    }
+    
+    let fileBuffer;
+    let retries = 3;
+    let delay = 150;
+    
+    while (retries > 0) {
+        try {
+            fileBuffer = fs.readFileSync(dbPath);
+            break;
+        } catch (err) {
+            retries--;
+            if (retries === 0) throw err;
+            sleepSync(delay);
+        }
+    }
+    
+    const recordCount = fileBuffer.readInt32LE(4);
+    const headerLength = fileBuffer.readInt16LE(8);
+    const recordLength = fileBuffer.readInt16LE(10);
+    
+    const fields = [];
+    let offset = 32;
+    let currentRecordOffset = 1;
+    
+    while (offset < headerLength - 1) {
+        const fieldBuffer = fileBuffer.subarray(offset, offset + 32);
+        if (fieldBuffer[0] === 0x0D) break;
+        let ne = 0;
+        while (ne < 11 && fieldBuffer[ne] !== 0) ne++;
+        const name = fieldBuffer.subarray(0, ne).toString('ascii').trim();
+        const type = String.fromCharCode(fieldBuffer[11]);
+        const len = fieldBuffer[16];
+        
+        fields.push({
+            name,
+            type,
+            length: len,
+            offset: currentRecordOffset
+        });
+        currentRecordOffset += len;
+        offset += 32;
+    }
+    
+    const big5Decoder = new TextDecoder('big5');
+    
+    // 預先標準化所有關鍵字，避免在迴圈內重複處理
+    const normKeywords = productKeywords.map(kw => {
+        let cleanQuery = normalizeText(kw.trim());
+        let initialParts = cleanQuery
+            .replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ')
+            .split(/[\s　]+/)
+            .filter(t => t.length > 0);
+        
+        let queryTokens = [];
+        for (const part of initialParts) {
+            const hasChinese = /[\u4e00-\u9fa5]/.test(part);
+            const hasAlphanumeric = /[a-z0-9]/.test(part);
+            
+            if (hasChinese && !hasAlphanumeric) {
+                queryTokens.push(part);
+            } else {
+                const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/gi;
+                let match;
+                while ((match = regex.exec(part)) !== null) {
+                    queryTokens.push(match[0].toLowerCase());
+                }
+            }
+        }
+        return {
+            compact: cleanQuery.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】]/g, ''),
+            tokens: Array.from(new Set(queryTokens))
+        };
+    });
+    
+    for (let r = 0; r < recordCount; r++) {
+        const filePos = headerLength + (r * recordLength);
+        if (filePos + recordLength > fileBuffer.length) break;
+        if (fileBuffer[filePos] === 0x2A) continue; // 排除已刪除紀錄
+        
+        const recordBuf = fileBuffer.subarray(filePos, filePos + recordLength);
+        const record = {};
+        
+        // 關鍵優化：僅提取匹配必須的 4 個欄位，其餘 10 多個欄位不進行解碼與數值轉換，節省大量 CPU
+        const targetFields = ['NO', 'NAME', 'BNO', 'BNO1'];
+        for (const f of fields) {
+            if (targetFields.includes(f.name)) {
+                const rawVal = recordBuf.subarray(f.offset, f.offset + f.length);
+                let end = rawVal.length;
+                while (end > 0 && (rawVal[end - 1] === 0x20 || rawVal[end - 1] === 0x00)) end--;
+                record[f.name] = big5Decoder.decode(rawVal.subarray(0, end));
+            }
+        }
+        
+        if (!record['NO']) continue;
+        
+        const nameStr = record['NAME'] || '';
+        const nameClean = nameStr.replace(/\b\d{2,3}\.\d{2}\.\d{2}\b/g, '');
+        const normName = normalizeText(nameClean);
+        const nameSpaced = normName.replace(/[\*\-\+\/\(\)\[\]\（\）\【\】]/g, ' ');
+        const nameCompact = normName.replace(/\s+/g, '');
+        
+        const normNo = normalizeText(record['NO']);
+        const normBno = normalizeText(record['BNO']);
+        const normBno1 = normalizeText(record['BNO1']);
+        
+        const searchKey = `${nameSpaced} ${nameCompact} ${normNo} ${normBno} ${normBno1}`;
+        
+        // 核心邏輯優化：確認該商品是否同時符合所有關鍵字條件 (AND 關係)
+        let matchAllKeywords = true;
+        for (const nk of normKeywords) {
+            let score = 0;
+            if (nameCompact.includes(nk.compact) || normNo.includes(nk.compact) || normBno.includes(nk.compact) || normBno1.includes(nk.compact)) {
+                score = 100;
+            } else if (nk.tokens.length > 0) {
+                const matchesAll = nk.tokens.every(token => searchKey.includes(token));
+                if (matchesAll) {
+                    score = 10;
+                }
+            }
+            if (score === 0) {
+                matchAllKeywords = false;
+                break;
+            }
+        }
+        
+        // 只要找到任意一個商品能滿足所有關鍵字條件，即刻 Early Return，跳出整個函數
+        if (matchAllKeywords) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 // Optimized DBF reader that reads in chunks when scanning backward (for ougo1.dbf)
 function queryDbfOptimized(dbPath, filterFn, options = {}) {
     const { 
@@ -907,13 +1054,25 @@ class TelegramBotInstance {
                         if (f === 'query') return '• 價格與庫存查詢 🔍';
                         if (f === 'history') return '• 客戶歷史售價查詢 💰';
                         return f;
-                    }).join('\n')}\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。`,
+                    }).join('\n')}\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n\n💡 <b>小技巧</b>：可輸入多個關鍵字（用空白分開）來精確搜尋商品。例如輸入「<code>3m 膚色 1吋</code>」會找同時符合這三個詞的商品。`,
                     myKeyboard
                 );
                 console.log(`[註冊 - ${this.name}] 已成功註冊新聊天室: [${chatName}] (${chatId})`);
             } else {
-                sendTelegramMessage(this.token, chatId, `ℹ️ <b>提示</b>：本聊天室先前已經註冊過了！\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。`, myKeyboard);
+                sendTelegramMessage(this.token, chatId, `ℹ️ <b>提示</b>：本聊天室先前已經註冊過了！\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n\n💡 <b>小技巧</b>：可輸入多個關鍵字（用空白分開）來精確搜尋商品。例如輸入「<code>3m 膚色 1吋</code>」會找同時符合這三個詞的商品。`, myKeyboard);
             }
+            return;
+        }
+
+        // 🛡️ 授權白名單安全守衛 (防範未授權對話進行查詢與操作設定)
+        if (!this.authorizedChats.includes(chatId)) {
+            console.log(`[安全性 - ${this.name}] 拒絕未授權聊天室的存取請求: [${chatName}] (${chatId})`);
+            sendTelegramMessage(
+                this.token,
+                chatId,
+                `⚠️ <b>未獲授權的聊天室</b>\n\n本聊天室（ID: <code>${chatId}</code>）尚未獲得本系統授權，無法使用此機器人。\n\n💡 同仁請在本對話框中發送 <code>/start</code> 進行註冊，並請管理員於設定後台進行勾選授權與儲存。`,
+                myKeyboard
+            );
             return;
         }
 
@@ -982,7 +1141,7 @@ class TelegramBotInstance {
         // 🛡️ 空白輸入 / 純符號 / 輸入太短防護
         const cleanedKeyword = keyword.replace(/[\s\*\-\+\/\(\)\[\]\（\）\【\】\+]+/g, '').trim();
         if (cleanedKeyword.length === 0) {
-            sendTelegramMessage(this.token, chatId, `💡 <b>請輸入關鍵字</b>\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n例如：<code>酒精</code>、<code>3m膚色1吋</code>、<code>A222-1</code>`, myKeyboard);
+            sendTelegramMessage(this.token, chatId, `💡 <b>請輸入關鍵字</b>\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n例如：<code>酒精</code>、<code>3m 膚色 1吋</code>、<code>A222-1</code>\n\n💡 <b>技巧</b>：可輸入多個關鍵字（用空格分隔）來精確篩選。例如輸入「<code>3m 膚色 1吋</code>」將只會列出同時符合這些條件的商品。`, myKeyboard);
             return;
         }
         if (cleanedKeyword.length === 1 && /^[0-9]$/.test(cleanedKeyword)) {
@@ -1006,6 +1165,28 @@ class TelegramBotInstance {
                     const dbDir = path.dirname(config.databasePath);
                     const ougo1DbPath = path.join(dbDir, 'ougo1.dbf');
                     
+                    // 【架構優化】：在開啟並掃描超大銷貨歷史檔前，利用一次性讀取與 Early Return 快速攔截無效商品查詢
+                    let hasValidProduct = false;
+                    try {
+                        hasValidProduct = checkProductKeywordsExist(config.databasePath, productKeywords);
+                    } catch (err) {
+                        console.warn(`[歷史查詢預檢] 讀取商品庫失敗，保守跳過預檢:`, err.message);
+                        hasValidProduct = true; // 基本庫異常時放行，避免阻斷功能
+                    }
+
+                    if (!hasValidProduct) {
+                        let reply = `🔍 <b>客戶專屬歷史售價查詢結果</b>\n`;
+                        reply += `🏢 客戶：<b>[${customerRecord.NO}] ${customerRecord.NAME}</b>\n`;
+                        reply += `📦 商品關鍵字：<code>${productKeywords.join(' ')}</code>\n\n`;
+                        reply += `⚠️ <b>未找到相關商品</b>\n`;
+                        reply += `商品基本庫中查無與關鍵字「${productKeywords.join(' ')}」相關之商品。請確認商品名稱或編號是否正確。`;
+                        if (customerTip) {
+                            reply += customerTip;
+                        }
+                        sendTelegramMessage(this.token, chatId, reply, myKeyboard);
+                        return;
+                    }
+
                     const history = queryDbfOptimized(ougo1DbPath, (record) => {
                         // 🛡️ NAME 欄位空值防護，避免 undefined.includes() 拋出 TypeError
                         const recordName = record.NAME || '';
@@ -1033,7 +1214,11 @@ class TelegramBotInstance {
                         
                         history.forEach((rec, idx) => {
                             const dateStr = rec.DAT.substring(0, 4) + '/' + rec.DAT.substring(4, 6) + '/' + rec.DAT.substring(6, 8);
-                            reply += `📅 <b>${dateStr}</b>\n`;
+                            const nameStr = rec.MNAME || '';
+                            const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
+                            const stopBadge = isStopped ? ' ⛔ <b>[已停售]</b>' : '';
+                            
+                            reply += `📅 <b>${dateStr}</b>${stopBadge}\n`;
                             reply += `🛒 品名：${rec.MNAME} (<code>${rec.MNO}</code>)\n`;
                             reply += `📊 數量：<b>${rec.QUT}</b> ${rec.UNIT.trim()}\n`;
                             reply += `💵 單價：<b>$${rec.PRICE.toLocaleString()}</b>\n`;
