@@ -1,4 +1,4 @@
-# 1. 強制結束 Port 3000 和 Port 28256 上的 node 進程
+# 1. Force kill node processes on port 3000 and 28256
 $ports = @(3000, 28256)
 foreach ($port in $ports) {
     $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
@@ -10,20 +10,24 @@ foreach ($port in $ports) {
     }
 }
 
-# 2. 清理殘留的 localtunnel 進程
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*localtunnel*" } | ForEach-Object {
+# 2. Clean up leftover localtunnel and bridge processes
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*localtunnel*" -or $_.CommandLine -like "*telegram_bridge.js*" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
 Start-Sleep -Seconds 2
 
-# 3. 在背景啟動 take_server.js
-Start-Process -FilePath "node.exe" -ArgumentList "take_server.js" -WorkingDirectory "C:\agy_Add_on\ERP 隨身查與盤點" -WindowStyle Hidden
+# Resolve working directory dynamically to avoid Chinese path encoding issues
+$parentDir = Split-Path -Parent $PSScriptRoot
 
-# 4. 在背景啟動 telegram_bot.js
-Start-Process -FilePath "node.exe" -ArgumentList "telegram_bot.js" -WorkingDirectory "C:\agy_Add_on\ERP 隨身查與盤點" -WindowStyle Hidden
+$takeVbs = Join-Path $parentDir "run_take.vbs"
+$queryVbs = Join-Path $parentDir "run_query.vbs"
+$bridgeVbs = Join-Path $PSScriptRoot "run_bridge.vbs"
 
-# 5. 在背景啟動 telegram_bridge.js (AI 助理橋接器)
-Start-Process -FilePath "node.exe" -ArgumentList "telegram_bridge.js" -WorkingDirectory "C:\agy_Add_on\ERP 隨身查與盤點\ai_assistant" -WindowStyle Hidden
+# 3. Start Node services by directly invoking VBScript wrappers using PowerShell call operator (&)
+# This bypasses external command-line argument encoding conversion errors
+& $takeVbs
+& $queryVbs
+& $bridgeVbs
 
 Write-Output "Services restarted successfully."
