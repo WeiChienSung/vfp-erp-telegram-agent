@@ -1550,5 +1550,24 @@ setupConfigWatcher();
 
 console.log(`[系統] Telegram Bot 動態協調管理器已開啟。`);
 
+// 如果是啟動/重啟，向開發者發送一次通知 (BOT_1 專屬)
+try {
+    const devBot = config.bots.find(b => b.name === 'BOT_1');
+    if (devBot && devBot.token) {
+        const devChatId = 5976208790;
+        if (devBot.authorizedChats.includes(devChatId)) {
+            sendTelegramMessage(
+                devBot.token,
+                devChatId,
+                `🚀 <b>系統已重啟成功！</b>\n\n本機價格查詢與售價歷史服務已在背景重新開啟。\n\n<i>（本通知為開發者 BOT_1 專屬重啟推播）</i>`
+            );
+            console.log(`[系統] 已向開發者 (${devChatId}) 發送重啟通知。`);
+        }
+    }
+} catch (err) {
+    console.error('[系統] 發送開發者重啟通知失敗:', err.message);
+}
+
 console.log('---------------------------------------------');
 console.log('服務運行中，可按 Ctrl+C 結束。');
+
