@@ -1,0 +1,14 @@
+{
+  "trayText": "ERP 隨身查與盤點助手 (運行中)",
+  "menuChat": "🤖 與 AI 助理對話 (Telegram)",
+  "menuUrl": "🔗 查看外網網址",
+  "menuStop": "⏹️ 停止所有服務",
+  "menuExit": "❌ 退出程式",
+  "notificationTitle": "ERP 行動助理",
+  "notificationStartup": "系統常駐托盤已啟動！雙擊圖示可隨時找我對話。",
+  "notificationStopping": "正在停止所有背景 Node 服務...",
+  "notificationStopped": "所有背景 Node 服務已確實終止。",
+  "msgBoxUrlTitle": "ERP 行動助理",
+  "msgBoxUrlText": "您的行動盤點外網連結：\n\n",
+  "msgBoxUrlEmpty": "目前尚未取得外網網址，請稍候重試或點擊重啟服務。"
+}
