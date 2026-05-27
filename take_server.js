@@ -561,13 +561,67 @@ function calcForecastData() {
 // =============================================
 let tunnelUrl = '';
 
+let ltProcess = null;
+let tunnelCheckInterval = null;
+
+function checkTunnelAlive(url) {
+    if (!url) return;
+    console.log(`[存活檢測] 正在檢測外網通道存活狀態: ${url}`);
+    
+    // 發送一個簡單的 GET 請求給我們自己的外網網址的靜態檔案 (以防 API 造成額外 DB 負擔)
+    const parsed = new URL(url);
+    const options = {
+        hostname: parsed.hostname,
+        port: 443,
+        path: '/index.js',
+        method: 'GET',
+        timeout: 8000,
+        rejectUnauthorized: false // 忽略可能發生的 SSL 憑證錯誤
+    };
+
+    const req = https.request(options, (res) => {
+        if (res.statusCode === 200) {
+            console.log(`[存活檢測] 外網通道正常！(Status: ${res.statusCode})`);
+        } else {
+            console.warn(`[存活檢測] 外網通道回應異常！Status: ${res.statusCode}，準備重建通道...`);
+            rebuildTunnel();
+        }
+    });
+
+    req.on('error', (e) => {
+        console.error(`[存活檢測] 外網通道連線失敗: ${e.message}，準備重建通道...`);
+        rebuildTunnel();
+    });
+
+    req.on('timeout', () => {
+        req.destroy();
+        console.error(`[存活檢測] 外網通道超時 (8秒無回應)，準備重建通道...`);
+        rebuildTunnel();
+    });
+
+    req.end();
+}
+
+function rebuildTunnel() {
+    if (tunnelCheckInterval) {
+        clearInterval(tunnelCheckInterval);
+        tunnelCheckInterval = null;
+    }
+    if (ltProcess) {
+        console.log('[系統] 存活檢測判定通道假死，正在關閉舊的 Localtunnel 進程...');
+        try {
+            ltProcess.kill('SIGTERM');
+        } catch(e) {}
+    }
+}
+
 function startTunnel() {
     const subdomainVal = config.subdomain || "nmedi-erp-take";
     console.log(`[系統] 正在建立 Localtunnel 安全加密通道 (固定子網域: ${subdomainVal})...`);
     
-    const lt = spawn('npx.cmd', ['localtunnel', '--port', '3000', '--subdomain', subdomainVal], { shell: true });
+    ltProcess = spawn('npx.cmd', ['localtunnel', '--port', '3000', '--subdomain', subdomainVal], { shell: true });
     
-    lt.stdout.on('data', (data) => {
+    ltProcess.stdout.on('data', (data) => {
         const text = data.toString();
         console.log(`[Localtunnel] ${text.trim()}`);
         if (text.includes('your url is:')) {
@@ -575,7 +629,7 @@ function startTunnel() {
             if (match) {
                 const baseTunnelUrl = match[0].trim();
                 
-                // 檢查實際獲取的子網域是否相符，防範被他人佔用時被指派為其他隨機域名
+                // 檢查實際獲取的子網域是否相符
                 if (!baseTunnelUrl.includes(subdomainVal)) {
                     console.warn(`[Localtunnel 警告] 要求的子網域 "${subdomainVal}" 被佔用或不可用，實際分配的網址為: ${baseTunnelUrl}`);
                 }
@@ -589,15 +643,26 @@ function startTunnel() {
                 
                 // 主動發送訊息給管理員
                 sendTunnelUrlToChats();
+
+                // 啟動定時存活檢查 (每 1.5 分鐘檢查一次)
+                if (tunnelCheckInterval) clearInterval(tunnelCheckInterval);
+                tunnelCheckInterval = setInterval(() => {
+                    checkTunnelAlive(baseTunnelUrl);
+                }, 90000);
             }
         }
     });
 
-    lt.stderr.on('data', (data) => console.error(`[Localtunnel 錯誤] ${data.toString().trim()}`));
+    ltProcess.stderr.on('data', (data) => console.error(`[Localtunnel 錯誤] ${data.toString().trim()}`));
 
-    lt.on('close', (code) => {
+    ltProcess.on('close', (code) => {
         console.log(`[系統] Localtunnel 通道已關閉，代碼: ${code}。5秒後嘗試重新建立...`);
         cleanupUrlFile();
+        ltProcess = null;
+        if (tunnelCheckInterval) {
+            clearInterval(tunnelCheckInterval);
+            tunnelCheckInterval = null;
+        }
         setTimeout(startTunnel, 5000);
     });
 }
