@@ -565,6 +565,7 @@ let ltProcess = null;
 let tunnelCheckInterval = null;
 let ltStartupTimeout = null;
 let ltSubdomainRetryCount = 0;
+let isFirstTunnelConnection = true;
 
 function checkTunnelAlive(url) {
     if (!url) return;
@@ -678,8 +679,13 @@ function startTunnel() {
                 // 寫入共用網址檔案，供 ERP 隨身查 Bot 查詢
                 fs.writeFileSync(ACTIVE_URL_PATH, tunnelUrl, 'utf8');
                 
-                // 主動發送訊息給管理員
-                sendTunnelUrlToChats();
+                // 主動發送訊息給管理員 (自愈重連時不發送以防打擾)
+                if (isFirstTunnelConnection) {
+                    sendTunnelUrlToChats();
+                    isFirstTunnelConnection = false;
+                } else {
+                    console.log('[系統] 自愈重連成功，網址已更新，但不重複發送 Telegram 推播通知以防打擾。');
+                }
 
                 // 啟動定時存活檢查 (每 1.5 分鐘檢查一次)
                 if (tunnelCheckInterval) clearInterval(tunnelCheckInterval);

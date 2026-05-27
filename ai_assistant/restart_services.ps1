@@ -17,18 +17,9 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.
 
 Start-Sleep -Seconds 2
 
-# Resolve working directory dynamically to avoid Chinese path encoding issues
-$parentDir = Split-Path -Parent $PSScriptRoot
-
-$takeVbs = Join-Path $parentDir "run_take.vbs"
-$queryVbs = Join-Path $parentDir "run_query.vbs"
-$bridgeVbs = Join-Path $PSScriptRoot "run_bridge.vbs"
-
-# 3. Start Node services via VBScript wrappers using WScript.Shell COM Object
-# WScript.Shell natively handles Unicode strings (Chinese paths) and runs without console flashing
-$ws = New-Object -ComObject WScript.Shell
-$ws.Run("wscript.exe `"$takeVbs`"", 0, $false)
-$ws.Run("wscript.exe `"$queryVbs`"", 0, $false)
-$ws.Run("wscript.exe `"$bridgeVbs`"", 0, $false)
+# 3. Start Node services via cscript.exe wrappers to decouple process lifecycles from parent PowerShell session
+Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_take.vbs" -WindowStyle Hidden
+Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_query.vbs" -WindowStyle Hidden
+Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_bridge.vbs" -WindowStyle Hidden
 
 Write-Output "Services restarted successfully."
