@@ -1089,13 +1089,17 @@ class TelegramBotInstance {
                     reply += `👉 點選下方按鈕開啟完整儀表板\n可搜尋品名、依廠商篩選、或匯出 CSV 報表。`;
                 }
 
-                // 嘗試從 active_url.txt 取得 Localtunnel 外網 URL，產生儀表板連結
+                // 嘗試從 active_url.txt 取得 Localtunnel 外網 URL，產生儀表板連結 (排除問號後面可能的 token 參數避免二次拼接錯誤)
                 let dashboardUrl = 'http://localhost:3000/forecast';
                 try {
                     if (fs.existsSync(ACTIVE_URL_PATH)) {
                         const rawUrl = fs.readFileSync(ACTIVE_URL_PATH, 'utf8').trim();
                         if (rawUrl) {
-                            const baseUrl = rawUrl.replace(/\/+$/, '');
+                            let baseUrl = rawUrl;
+                            if (rawUrl.includes('?')) {
+                                baseUrl = rawUrl.split('?')[0];
+                            }
+                            baseUrl = baseUrl.replace(/\/+$/, '');
                             const apiToken = require('./config.json').apiToken || '';
                             dashboardUrl = `${baseUrl}/forecast${apiToken ? '?token=' + apiToken : ''}`;
                         }

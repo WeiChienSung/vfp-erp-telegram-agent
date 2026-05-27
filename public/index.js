@@ -2,11 +2,24 @@
 document.addEventListener('DOMContentLoaded', () => {
     // 解析網址上的 token 金鑰並存入暫存 (改用 localStorage 以便在 Webview/重新整理時持久化)
     const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get('token');
+    let token = urlParams.get('token');
     if (token) {
-        localStorage.setItem('api_token', token);
-        // 清除網址列上的 token 以免被截圖或看見
-        window.history.replaceState({}, document.title, window.location.pathname);
+        // 判斷是否為無效/被污染的拼接 Token (不應含斜線、問號、或過長)
+        if (token.includes('/') || token.includes('?') || token.length > 50) {
+            console.warn('[安全鎖] 偵測到被污染的無效 Token，拒絕寫入:', token);
+            localStorage.removeItem('api_token');
+        } else {
+            localStorage.setItem('api_token', token);
+            // 清除網址列上的 token 以免被截圖或看見
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+    }
+
+    // 檢查現存的 localStorage 是否含有被污染的髒數據，有的話自動清除
+    const cachedTokenOnLoad = localStorage.getItem('api_token') || '';
+    if (cachedTokenOnLoad && (cachedTokenOnLoad.includes('/') || cachedTokenOnLoad.includes('?') || cachedTokenOnLoad.length > 50)) {
+        console.warn('[安全鎖] 偵測到 localStorage 中有被污染的舊 Token，自動清除。');
+        localStorage.removeItem('api_token');
     }
 
     // 封裝自帶 Token 驗證的 API 請求輔助函數
