@@ -106,11 +106,76 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnClearDraft = document.getElementById('btn-clear-draft');
     const btnUploadTake = document.getElementById('btn-upload-take');
 
+    // Auth Elements
+    const authModal = document.getElementById('auth-modal');
+    const inputAuthToken = document.getElementById('input-auth-token');
+    const btnSubmitAuth = document.getElementById('btn-submit-auth');
+    const authErrorMsg = document.getElementById('auth-error-msg');
+
     // Lucide Icon Initializer
     lucide.createIcons();
 
-    // 1. Initial Load: Fetch Suppliers
-    fetchSuppliers();
+    // 1. Initial Load: 檢查並載入
+    initApp();
+
+    function initApp() {
+        const cachedToken = localStorage.getItem('api_token') || '';
+        if (!cachedToken) {
+            showAuthModal();
+        } else {
+            fetchSuppliers();
+        }
+    }
+
+    function showAuthModal(isError = false) {
+        authModal.classList.remove('hidden');
+        if (isError) {
+            authErrorMsg.classList.remove('hidden');
+        } else {
+            authErrorMsg.classList.add('hidden');
+        }
+        inputAuthToken.value = localStorage.getItem('api_token') || '';
+        setTimeout(() => inputAuthToken.focus(), 150);
+    }
+
+    btnSubmitAuth.addEventListener('click', async () => {
+        const inputVal = inputAuthToken.value.trim();
+        if (!inputVal) {
+            authErrorMsg.textContent = '⚠️ 請輸入安全金鑰';
+            authErrorMsg.classList.remove('hidden');
+            return;
+        }
+
+        btnSubmitAuth.disabled = true;
+        const origText = btnSubmitAuth.innerHTML;
+        btnSubmitAuth.textContent = '驗證中...';
+        authErrorMsg.classList.add('hidden');
+
+        localStorage.setItem('api_token', inputVal);
+
+        try {
+            const res = await apiFetch('/api/suppliers');
+            await checkResponse(res);
+            suppliersList = await res.json();
+            
+            renderSuppliersDropdown(suppliersList);
+            authModal.classList.add('hidden');
+        } catch (err) {
+            authErrorMsg.textContent = err.message.includes('401') 
+                ? '⚠️ 金鑰不正確，請重新輸入。' 
+                : `⚠️ 連線錯誤: ${err.message}`;
+            authErrorMsg.classList.remove('hidden');
+        } finally {
+            btnSubmitAuth.disabled = false;
+            btnSubmitAuth.innerHTML = origText;
+        }
+    });
+
+    inputAuthToken.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            btnSubmitAuth.click();
+        }
+    });
 
     async function fetchSuppliers() {
         try {
@@ -120,8 +185,13 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // 渲染全體廠商名單到下拉選單
             renderSuppliersDropdown(suppliersList);
+            authModal.classList.add('hidden');
         } catch (err) {
-            alert('載入廠商錯誤: ' + err.message);
+            if (err.message.includes('401')) {
+                showAuthModal(true);
+            } else {
+                alert('載入廠商錯誤: ' + err.message);
+            }
             supplierDropdownList.innerHTML = `<li class="dropdown-placeholder text-danger">載入失敗: ${err.message}</li>`;
         }
     }

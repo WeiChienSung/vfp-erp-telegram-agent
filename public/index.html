@@ -233,6 +233,33 @@
         </div>
     </div>
 
+    <!-- 金鑰驗證對話視窗 (Auth Modal) -->
+    <div id="auth-modal" class="modal-backdrop hidden">
+        <div class="modal-card scale-up">
+            <div class="modal-header" style="text-align: center; display: flex; flex-direction: column; align-items: center;">
+                <div style="background: #eef2ff; border-radius: 50%; padding: 12px; margin-bottom: 12px; color: #4f46e5;">
+                    <i data-lucide="key-round" style="width: 32px; height: 32px;"></i>
+                </div>
+                <h3>請輸入安全驗證金鑰</h3>
+            </div>
+            <div class="modal-body">
+                <p class="section-desc" style="text-align: center; margin-bottom: 16px;">本系統設有外網訪問安全鎖。請輸入您從 Telegram 隨身查 Bot 取得的安全金鑰：</p>
+                <div class="input-group">
+                    <input type="text" id="input-auth-token" placeholder="請輸入或貼上金鑰..." class="form-input" style="text-align: center; font-family: monospace; font-size: 1.1rem; letter-spacing: 1px; width: 100%; border: 2px solid #e2e8f0; border-radius: 8px; padding: 10px;">
+                </div>
+                <div id="auth-error-msg" class="text-danger hidden" style="font-size:0.85rem;margin-top:12px;text-align:center;font-weight:500;background:#fef2f2;border:1px solid #fee2e2;padding:8px;border-radius:6px;">
+                    ⚠️ 金鑰無效或不正確，請重新輸入。
+                </div>
+            </div>
+            <div class="modal-footer" style="flex-direction: column; gap: 10px; width: 100%;">
+                <button id="btn-submit-auth" class="btn btn-primary" style="width: 100%; justify-content: center; padding: 12px; font-weight: 500;">驗證並開始盤點</button>
+                <p style="font-size: 0.75rem; color: #6b7280; text-align: center; margin: 4px 0 0;">
+                    提示：在 Telegram 輸入「盤點」即可獲取最新金鑰
+                </p>
+            </div>
+        </div>
+    </div>
+
     <script src="index.js"></script>
 </body>
 </html>
