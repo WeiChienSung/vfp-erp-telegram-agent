@@ -23,4 +23,7 @@ Start-Process -FilePath "node.exe" -ArgumentList "take_server.js" -WorkingDirect
 # 4. 在背景啟動 telegram_bot.js
 Start-Process -FilePath "node.exe" -ArgumentList "telegram_bot.js" -WorkingDirectory "C:\agy_Add_on\ERP 隨身查與盤點" -WindowStyle Hidden
 
+# 5. 在背景啟動 telegram_bridge.js (AI 助理橋接器)
+Start-Process -FilePath "node.exe" -ArgumentList "telegram_bridge.js" -WorkingDirectory "C:\agy_Add_on\ERP 隨身查與盤點\ai_assistant" -WindowStyle Hidden
+
 Write-Output "Services restarted successfully."
