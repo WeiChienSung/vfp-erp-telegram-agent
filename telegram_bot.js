@@ -1264,6 +1264,50 @@ class TelegramBotInstance {
             const searchResults = readStockDb(config.databasePath, keyword, false);
             console.log(`[查詢 - ${this.name}] 關鍵字 "${keyword}" 查得 ${searchResults.length} 筆`);
             if (searchResults.length === 0) {
+                // 嘗試多關鍵字拆分查價降級 (小美的貼心設計)
+                // 用空白、逗號、頓號等符號分割
+                const subKeywords = keyword
+                    .split(/[\s　，,、]+/g)
+                    .map(w => w.trim())
+                    .filter(w => w.length >= 2); // 避免查詢單一字元造成海量資料
+
+                if (subKeywords.length > 1) {
+                    let fallbackReply = `❌ 查無同時包含所有關鍵字的商品。\n💡 <b>已為您自動拆開查詢各個關鍵字：</b>\n\n`;
+                    let hasAnyMatch = false;
+
+                    for (const subKw of subKeywords) {
+                        try {
+                            const subResults = readStockDb(config.databasePath, subKw, false);
+                            if (subResults.length > 0) {
+                                hasAnyMatch = true;
+                                fallbackReply += `🔍 <b>與「${subKw}」相關的商品（最符合前 3 筆）：</b>\n`;
+                                const displayLimit = Math.min(subResults.length, 3);
+                                for (let k = 0; k < displayLimit; k++) {
+                                    // ⛔ 停售品警示標記
+                                    const subItem = subResults[k];
+                                    const subNameStr = subItem.NAME || '';
+                                    const isSubStopped = subNameStr.includes('停產') || subNameStr.includes('停用') || subNameStr.includes('停售');
+                                    if (isSubStopped) {
+                                        fallbackReply += `⛔ <b>[此商品已停售，請勿報價]</b>\n`;
+                                    }
+                                    fallbackReply += formatProductInfo(subItem);
+                                    fallbackReply += `-----------------------------------\n\n`;
+                                }
+                            }
+                        } catch (err) {
+                            console.error(`[降級查詢錯誤] 子關鍵字 "${subKw}" 查詢失敗:`, err.message);
+                        }
+                    }
+
+                    if (hasAnyMatch) {
+                        if (customerTip) {
+                            fallbackReply += customerTip;
+                        }
+                        sendTelegramMessage(this.token, chatId, fallbackReply, myKeyboard);
+                        return;
+                    }
+                }
+
                 let errReply = `❌ 查無符合關鍵字「<b>${keyword}</b>」的商品，請嘗試其他關鍵字。`;
                 if (customerTip) {
                     errReply += customerTip;
