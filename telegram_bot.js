@@ -248,8 +248,8 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
                     queryTokens.push(part);
                 } else {
                     // 混合或純英數 (如 "3m1吋膚", "針頭23g", "c203") -> 在中文與英數字邊界上拆分
-                    // 保留英數字組合 (e.g. "3m" 保持為 "3m"，而非拆成 "3" 和 "m")
-                    const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/gi;
+                    // 保留英數字組合 (e.g. "3m" 保持為 "3m"，且中文部分保持連貫，加上 + 號)
+                    const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]+/gi;
                     let match;
                     while ((match = regex.exec(part)) !== null) {
                         queryTokens.push(match[0].toLowerCase());
@@ -264,11 +264,49 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
             // 優先級 1：緊湊字串完全匹配 (如 "3m1吋膚" -> "3m通氣紙膠膚色1吋") -> 滿分 100
             if (nameCompact.includes(compactQuery) || normNo.includes(compactQuery) || normBno.includes(compactQuery) || normBno1.includes(compactQuery)) {
                 score = 100;
+                // 額外給予短品名密度獎勵 (最大 +9 分)，避免長品名蓋過短品名
+                score += Math.max(0, 9 - Math.floor(nameStr.length / 5));
             } else if (queryTokens.length > 0) {
-                // 優先級 2：分詞 AND 匹配 -> 分數 10
+                // 優先級 2：分詞 AND 匹配 -> 動態打分 (10 ~ 85 分)
                 const matchesAll = queryTokens.every(token => searchKey.includes(token));
                 if (matchesAll) {
                     score = 10;
+                    
+                    // 檢查是否在品名中按順序連續出現 (若按順序出現則大幅加分)
+                    let lastIndex = -1;
+                    let isOrdered = true;
+                    let firstMatchPos = -1;
+                    let lastMatchPos = -1;
+                    
+                    for (const token of queryTokens) {
+                        const idx = normName.indexOf(token);
+                        if (idx === -1) {
+                            isOrdered = false;
+                            break;
+                        }
+                        if (idx < lastIndex) {
+                            isOrdered = false;
+                        }
+                        lastIndex = idx;
+                        
+                        if (firstMatchPos === -1) firstMatchPos = idx;
+                        lastMatchPos = idx + token.length;
+                    }
+                    
+                    if (isOrdered) {
+                        // 順序正確：給予 70 分基礎分
+                        score = 70;
+                        // 距離越緊湊，加分越多 (夾雜字元越少越好)
+                        const span = lastMatchPos - firstMatchPos;
+                        const excess = span - queryTokens.reduce((sum, t) => sum + t.length, 0);
+                        score += Math.max(0, 15 - excess); // 緊湊度加分，最高 +15 分
+                    } else {
+                        // 順序錯亂：給予 15 分基礎分
+                        score = 15;
+                    }
+                    
+                    // 短品名長度密度獎勵 (最高 +10 分)
+                    score += Math.max(0, 10 - Math.floor(nameStr.length / 4));
                 }
             }
             
@@ -362,7 +400,8 @@ function checkProductKeywordsExist(dbPath, productKeywords) {
             if (hasChinese && !hasAlphanumeric) {
                 queryTokens.push(part);
             } else {
-                const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]/gi;
+                // 同步加上 + 號，確保 checkProductKeywordsExist 預檢行為與實際搜尋一致！
+                const regex = /[a-z0-9]+(?:\.[0-9]+)?|[\u4e00-\u9fa5]+/gi;
                 let match;
                 while ((match = regex.exec(part)) !== null) {
                     queryTokens.push(match[0].toLowerCase());
