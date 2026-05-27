@@ -1,8 +1,33 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const { spawn } = require('child_process');
+const { Worker } = require('worker_threads');
+const fsPromises = fs.promises;
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+
+/**
+ * 非同步檢測檔案是否存在，並支援超時控制，防止 UNC 網路共用磁碟斷線造成主執行緒阻塞。
+ * @param {string} filePath - 資料庫檔案路徑
+ * @param {number} timeoutMs - 超時限制時間 (毫秒)
+ */
+async function verifyDatabasePath(filePath, timeoutMs = 2500) {
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+            reject(new Error(`檢測資料庫路徑逾時 (${timeoutMs}ms)，請確認網路共用磁碟已連線、IP 正確且無防火牆阻擋。`));
+        }, timeoutMs);
+    });
+
+    const accessPromise = fsPromises.access(filePath, fs.constants.F_OK)
+        .then(() => true)
+        .catch(() => false);
+
+    const exists = await Promise.race([accessPromise, timeoutPromise]);
+    if (!exists) {
+        throw new Error(`找不到您輸入的資料庫檔案，請確認路徑是否正確或是否有權限讀取。`);
+    }
+}
 
 // 1. 載入設定檔
 let config = {
@@ -104,11 +129,15 @@ function startWebServer() {
         else if (pathname === '/api/config' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
-            req.on('end', () => {
+            req.on('end', async () => {
                 try {
                     const parsed = JSON.parse(body);
                     // 基本結構寫回檢驗
                     if (!parsed.databasePath) throw new Error('資料庫路徑不可為空');
+                    
+                    // 【安全優化】：非同步安全預檢資料庫路徑，防範 UNC 網路磁碟連線逾時阻塞
+                    await verifyDatabasePath(parsed.databasePath);
+                    
                     if (!parsed.bots || !Array.isArray(parsed.bots)) throw new Error('bots 必須是陣列格式');
                     
                     // 防寫回遮蔽 ******
