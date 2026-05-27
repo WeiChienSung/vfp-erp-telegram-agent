@@ -7,10 +7,30 @@ let currentFilter = 'urgent';
 let currentSort   = { col: 'daysLeft', asc: true };
 let prioritySet   = new Set();
 
-// 從 URL 取 token (Telegram 點連結時自動帶上)
+// 從 URL 或 localStorage 獲取安全金鑰 (Token)，並包含淨化與持久化
 function getToken() {
     const p = new URLSearchParams(window.location.search);
-    return p.get('token') || '';
+    const urlToken = p.get('token');
+    
+    if (urlToken) {
+        // 防呆淨化過濾：如果不含非法字元，則寫入 localStorage
+        if (!urlToken.includes('/') && !urlToken.includes('?') && urlToken.length <= 50) {
+            localStorage.setItem('api_token', urlToken);
+        }
+        // 清除網址列上的 token 參數以策安全
+        try {
+            window.history.replaceState({}, document.title, window.location.pathname);
+        } catch (e) {}
+        return urlToken;
+    }
+    
+    // 嘗試從 localStorage 獲取
+    const cachedToken = localStorage.getItem('api_token') || '';
+    if (cachedToken && !cachedToken.includes('/') && !cachedToken.includes('?') && cachedToken.length <= 50) {
+        return cachedToken;
+    }
+    
+    return '';
 }
 
 /* ─────────────────────────────────────
