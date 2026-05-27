@@ -10,8 +10,8 @@ foreach ($port in $ports) {
     }
 }
 
-# 2. Clean up leftover localtunnel and bridge processes
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*localtunnel*" -or $_.CommandLine -like "*telegram_bridge.js*" } | ForEach-Object {
+# 2. Clean up leftover localtunnel processes
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*localtunnel*" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
@@ -20,6 +20,5 @@ Start-Sleep -Seconds 2
 # 3. Start Node services via cscript.exe wrappers to avoid Session 0 GUI restriction
 Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_take.vbs" -WindowStyle Hidden
 Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_query.vbs" -WindowStyle Hidden
-Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_bridge.vbs" -WindowStyle Hidden
 
-Write-Output "Services restarted successfully."
+Write-Output "Services restarted successfully (Take and Query only)."

@@ -106,12 +106,40 @@ function normalizeText(str) {
         .replace(/尺/g, '呎');
 }
 
+function sleepSync(ms) {
+    try {
+        const sab = new SharedArrayBuffer(4);
+        const int32 = new Int32Array(sab);
+        Atomics.wait(int32, 0, 0, ms);
+    } catch (e) {
+        const start = Date.now();
+        while (Date.now() - start < ms) {}
+    }
+}
+
 function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThreshold = 5) {
     if (!fs.existsSync(dbPath)) {
         throw new Error(`找不到資料庫檔案: ${dbPath}`);
     }
     
-    const fileBuffer = fs.readFileSync(dbPath);
+    let fileBuffer;
+    let retries = 3;
+    let delay = 150; // 毫秒
+    
+    while (retries > 0) {
+        try {
+            fileBuffer = fs.readFileSync(dbPath);
+            break;
+        } catch (err) {
+            retries--;
+            if (retries === 0) {
+                console.error(`[資料庫] Bot 讀取資料庫失敗，已達最大重試次數: ${err.message}`);
+                throw err;
+            }
+            console.warn(`[資料庫] Bot 讀取資料庫被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
+            sleepSync(delay);
+        }
+    }
     const recordCount = fileBuffer.readInt32LE(4);
     const headerLength = fileBuffer.readInt16LE(8);
     const recordLength = fileBuffer.readInt16LE(10);
@@ -286,16 +314,41 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
         throw new Error(`找不到資料庫檔案: ${dbPath}`);
     }
     
-    // For small files (e.g. < 50MB), read entirely into memory for speed
-    const fileSize = fs.statSync(actualPath).size;
-    if (fileSize < 50 * 1024 * 1024) {
-        return queryDbfInMemory(actualPath, filterFn, { limit, reverse, fieldsToExtract });
+    let fileSize;
+    let fd;
+    let metaBuf = Buffer.alloc(32);
+    
+    let retries = 3;
+    let delay = 150; // 毫秒
+    
+    while (retries > 0) {
+        try {
+            fileSize = fs.statSync(actualPath).size;
+            fd = fs.openSync(actualPath, 'r');
+            fs.readSync(fd, metaBuf, 0, 32, 0);
+            break;
+        } catch (err) {
+            retries--;
+            if (fd) {
+                try { fs.closeSync(fd); } catch (e) {}
+                fd = null;
+            }
+            if (retries === 0) {
+                console.error(`[資料庫] Bot 讀取大檔案失敗，已達最大重試次數: ${err.message}`);
+                throw err;
+            }
+            console.warn(`[資料庫] Bot 讀取大檔案被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
+            sleepSync(delay);
+        }
     }
     
-    // For large files, use chunked reader
-    const fd = fs.openSync(actualPath, 'r');
-    const metaBuf = Buffer.alloc(32);
-    fs.readSync(fd, metaBuf, 0, 32, 0);
+    // For small files (e.g. < 50MB), read entirely into memory for speed
+    if (fileSize < 50 * 1024 * 1024) {
+        if (fd) {
+            try { fs.closeSync(fd); } catch (e) {}
+        }
+        return queryDbfInMemory(actualPath, filterFn, { limit, reverse, fieldsToExtract });
+    }
     
     const recordCount = metaBuf.readInt32LE(4);
     const headerLength = metaBuf.readInt16LE(8);
@@ -664,231 +717,7 @@ function sendTelegramMessage(token, chatId, text, replyMarkup = null, retryCount
     req.end();
 }
 
-// ============================================================
-// 3b. 動態低水位計算引擎（依過去 2 年月均出貨量 × 補貨週期天數）
-// ============================================================
-let _dynamicThresholdCache = null;
-let _dynamicThresholdCacheTime = 0;
-const THRESHOLD_CACHE_MS = 60 * 60 * 1000; // 快取 1 小時
 
-function calcDynamicThresholds(forceRefresh = false) {
-    const now = Date.now();
-    if (!forceRefresh && _dynamicThresholdCache && (now - _dynamicThresholdCacheTime) < THRESHOLD_CACHE_MS) {
-        return _dynamicThresholdCache;
-    }
-
-    try {
-        const dbDir = path.dirname(config.databasePath);
-        const ougo1DbPath = path.join(dbDir, 'ougo1.dbf');
-
-        if (!fs.existsSync(ougo1DbPath)) {
-            console.warn('[動態低水位] 找不到 ougo1.dbf，改用固定閾值。');
-            return {};
-        }
-
-        // 計算 2 年前的日期字串 (YYYYMMDD)
-        const cutoff = new Date();
-        cutoff.setFullYear(cutoff.getFullYear() - 2);
-        const cutoffStr = cutoff.getFullYear().toString() +
-            String(cutoff.getMonth() + 1).padStart(2, '0') +
-            String(cutoff.getDate()).padStart(2, '0');
-
-        const salesMap = {}; // { MNO: totalQut }
-
-        // 掃描 ougo1.dbf，透過閉包累加，不收集記錄節省記憶體
-        queryDbfOptimized(ougo1DbPath, (record) => {
-            const dat = (record.DAT || '').trim();
-            if (dat.length >= 8 && dat >= cutoffStr) {
-                const mno = (record.MNO || '').trim();
-                const qut = parseFloat(record.QUT) || 0;
-                if (mno && qut > 0) {
-                    salesMap[mno] = (salesMap[mno] || 0) + qut;
-                }
-            }
-            return false; // 只累加，不收集記錄
-        }, { reverse: false, limit: null, fieldsToExtract: ['DAT', 'MNO', 'QUT'] });
-
-        // 計算各商品低水位
-        const WORK_DAYS_MONTH = 22;  // 每月工作天
-        const leadDays = config.lowStockLeadTimeDays || 7;
-        const MONTHS = 24;
-        const minSales = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
-
-        const thresholds = {};
-        for (const [mno, totalQut] of Object.entries(salesMap)) {
-            // 過濾極低頻商品：2 年總銷量未達門檻，不納入預警
-            if (totalQut < minSales) continue;
-
-            const avgMonthly = totalQut / MONTHS;
-            const avgDailyWork = avgMonthly / WORK_DAYS_MONTH;
-            const lowWater = Math.max(Math.ceil(avgDailyWork * leadDays), 1);
-            thresholds[mno] = {
-                avgMonthly: Math.round(avgMonthly * 10) / 10,
-                avgDailyWork: Math.round(avgDailyWork * 10) / 10,
-                lowWater,
-                totalQut
-            };
-        }
-
-        _dynamicThresholdCache = thresholds;
-        _dynamicThresholdCacheTime = now;
-        console.log(`[動態低水位] 計算完成，共 ${Object.keys(thresholds).length} 個活躍商品 (截止日: ${cutoffStr}，門檻: ${minSales})`);
-        return thresholds;
-    } catch (err) {
-        console.error('[動態低水位] 計算失敗:', err.message);
-        return _dynamicThresholdCache || {};
-    }
-}
-
-// 產生完整庫存預測報告文字（非同步版，優先使用本地 Web Server 預估快取）
-async function generateForecastReport(includeHealthy = false) {
-    try {
-        const data = await new Promise((resolve, reject) => {
-            const req = http.get('http://127.0.0.1:3000/api/forecast', { timeout: 2000 }, (res) => {
-                if (res.statusCode !== 200) {
-                    return reject(new Error(`HTTP ${res.statusCode}`));
-                }
-                let body = '';
-                res.on('data', chunk => body += chunk);
-                res.on('end', () => {
-                    try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-                });
-            });
-            req.on('error', reject);
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('timeout'));
-            });
-        });
-        
-        const leadDays = data.meta.leadDays || 7;
-        const leadDaysText = `${leadDays} 工作天`;
-        
-        const urgent = data.items.filter(i => i.level === 'urgent');
-        const watch = data.items.filter(i => i.level === 'watch');
-        
-        // 依剩餘天數排序
-        urgent.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
-        watch.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
-        
-        let report = '';
-        if (urgent.length > 0) {
-            report += `🔴 <b>【緊急補貨 - 庫存不足 ${leadDaysText}】</b>\n`;
-            urgent.slice(0, 15).forEach((i) => {
-                report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
-                if (i.lowWater !== null) {
-                    report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 低水位：${i.lowWater}\n`;
-                    report += `  ⏰ 預估僅剩 <b>${i.daysLeft} 工作天</b> 存量\n\n`;
-                } else {
-                    report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} （無出貨紀錄，庫存偏低）\n\n`;
-                }
-            });
-            if (urgent.length > 15) report += `  <i>...還有 ${urgent.length - 15} 筆緊急品項</i>\n`;
-            report += `-----------------------------------\n\n`;
-        }
-        
-        if (watch.length > 0) {
-            report += `🟡 <b>【需關注 - 庫存約 ${leadDaysText}~30 天】</b>\n`;
-            watch.slice(0, 10).forEach((i) => {
-                report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
-                report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 預估剩 <b>${i.daysLeft} 天</b>\n\n`;
-            });
-            if (watch.length > 10) report += `  <i>...還有 ${watch.length - 10} 筆需關注品項</i>\n`;
-            report += `-----------------------------------\n\n`;
-        }
-        
-        console.log(`[智慧預測] 成功使用本地 Web Server 快取產出預測報告。`);
-        return {
-            report,
-            urgentCount: urgent.length,
-            watchCount: watch.length,
-            totalActive: data.meta.totalActive
-        };
-        
-    } catch (err) {
-        console.warn(`[智慧預測] 無法取得本地 Web Server 快取 (${err.message})，將降級為同步讀取 DBF 計算...`);
-        return generateForecastReportSync(includeHealthy);
-    }
-}
-
-// 產生完整庫存預測報告文字（同步降級版，直接掃描 DBF）
-function generateForecastReportSync(includeHealthy = false) {
-    const allItems = readStockDb(config.databasePath, null, false);
-    const activeItems = allItems.filter(item => {
-        const name = item.NAME || '';
-        return !name.includes('停產') && !name.includes('停用') && !name.includes('停售');
-    });
-
-    const thresholds = calcDynamicThresholds();
-    const fallback = config.lowStockFallback !== undefined ? config.lowStockFallback : 5;
-    const leadDays = config.lowStockLeadTimeDays || 7;
-
-    const urgent = [];   // 庫存天數 <= 補貨週期
-    const watch = [];    // 補貨週期 < 庫存天數 <= 30 天
-    const healthy = [];  // > 30 天或無銷售紀錄且庫存足夠
-
-    for (const item of activeItems) {
-        const stock = item.INVQT || 0;
-        if (stock < 0) continue; // 排除負庫存（ERP 資料異常，如未入帳退貨）
-        const th = thresholds[item.NO];
-
-        if (th) {
-            const daysLeft = th.avgDailyWork > 0
-                ? Math.round(stock / th.avgDailyWork)
-                : Infinity;
-            const entry = { item, th, daysLeft };
-
-            if (stock <= th.lowWater) {
-                if (daysLeft <= leadDays) {
-                    urgent.push(entry);
-                } else {
-                    watch.push(entry);
-                }
-            } else if (includeHealthy) {
-                healthy.push(entry);
-            }
-        } else {
-            // 無銷售紀錄的新品：只有庫存 > 0 且低於 fallback 才預警（排除死品庫存 = 0）
-            if (stock > 0 && stock <= fallback) {
-                urgent.push({ item, th: null, daysLeft: null });
-            }
-        }
-    }
-
-    // 依剩餘天數排序（緊急優先）
-    urgent.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
-    watch.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
-
-    let report = '';
-    const leadDaysText = `${leadDays} 工作天`;
-
-    if (urgent.length > 0) {
-        report += `🔴 <b>【緊急補貨 - 庫存不足 ${leadDaysText}】</b>\n`;
-        urgent.slice(0, 15).forEach(({ item, th, daysLeft }) => {
-            report += `• <b>${item.NAME}</b> (<code>${item.NO}</code>)\n`;
-            if (th) {
-                report += `  📦 庫存：<b>${item.INVQT}</b> ${(item.UNIT||'').trim()} | 月均：${th.avgMonthly} | 低水位：${th.lowWater}\n`;
-                report += `  ⏰ 預估僅剩 <b>${daysLeft} 工作天</b> 存量\n\n`;
-            } else {
-                report += `  📦 庫存：<b>${item.INVQT}</b> ${(item.UNIT||'').trim()} （無出貨紀錄，庫存偏低）\n\n`;
-            }
-        });
-        if (urgent.length > 15) report += `  <i>...還有 ${urgent.length - 15} 筆緊急品項</i>\n`;
-        report += `-----------------------------------\n\n`;
-    }
-
-    if (watch.length > 0) {
-        report += `🟡 <b>【需關注 - 庫存約 ${leadDaysText}~30 天】</b>\n`;
-        watch.slice(0, 10).forEach(({ item, th, daysLeft }) => {
-            report += `• <b>${item.NAME}</b> (<code>${item.NO}</code>)\n`;
-            report += `  📦 庫存：<b>${item.INVQT}</b> ${(item.UNIT||'').trim()} | 月均：${th.avgMonthly} | 預估剩 <b>${daysLeft} 天</b>\n\n`;
-        });
-        if (watch.length > 10) report += `  <i>...還有 ${watch.length - 10} 筆需關注品項</i>\n`;
-        report += `-----------------------------------\n\n`;
-    }
-
-    return { report, urgentCount: urgent.length, watchCount: watch.length, totalActive: activeItems.length };
-}
 
 // 格式化商品資訊
 function formatProductInfo(item) {
@@ -917,25 +746,19 @@ function formatProductInfo(item) {
 // 動態產生機器人自訂鍵盤 (依功能與權限)
 function getBotKeyboard(botInstance) {
     const row1 = [];
-    const row2 = [];
     
     // 只有在啟用 'take' (盤點) 功能時才顯示開始盤點按鈕
     if (botInstance.features && botInstance.features.includes('take')) {
         row1.push({"text": "📋 開始盤點"});
     }
     
-    // 只有 BOT_1 (管理員機器人) 才顯示管理後台與庫存預測按鈕
+    // 只有 BOT_1 (管理員機器人) 才顯示管理後台按鈕
     if (botInstance.name === 'BOT_1') {
         row1.push({"text": "⚙️ 管理後台"});
-        // 若有推播功能，加上庫存預測按鈕（放第二行）
-        if (botInstance.features && botInstance.features.includes('push')) {
-            row2.push({"text": "📊 庫存預測"});
-        }
     }
     
     const keyboard = [];
     if (row1.length > 0) keyboard.push(row1);
-    if (row2.length > 0) keyboard.push(row2);
     
     if (keyboard.length === 0) {
         return { remove_keyboard: true };
@@ -950,8 +773,7 @@ function getBotKeyboard(botInstance) {
 
 // 限流防刷：記錄每個聊天室 (chatId) 最後發送查詢的時間
 const userLastQueryTime = {};
-// 庫存預測計算鎖，防止多人重複重算
-let isCalculatingForecast = false;
+
 
 // 4. 物件導向機器人執行類別 (TelegramBotInstance)
 class TelegramBotInstance {
@@ -1009,7 +831,9 @@ class TelegramBotInstance {
                         const data = JSON.parse(body);
                         if (data.ok && data.result.length > 0) {
                             for (const update of data.result) {
-                                this.processUpdate(update);
+                                this.processUpdate(update).catch(err => {
+                                    console.error(`[Telegram Polling - ${this.name}] 處理訊息時發生未預期錯誤:`, err);
+                                });
                                 this.updateOffset = update.update_id + 1;
                             }
                         }
@@ -1124,73 +948,7 @@ class TelegramBotInstance {
             // 若非管理員機器人，則不攔截命令，流向商品搜尋以作偽裝
         }
 
-        // 處理庫存預測報告指令 (僅限管理員機器人 BOT_1 且有 push 功能)
-        if (text === '庫存預測' || text === '📊 庫存預測' || text.toLowerCase() === '/stock_forecast') {
-            if (!isSelf) return;
-            if (!this.features.includes('push')) {
-                sendTelegramMessage(this.token, chatId, `⚠️ 本機器人未啟用推播功能（push），無法使用庫存預測。`, myKeyboard);
-                return;
-            }
-            if (isCalculatingForecast) {
-                sendTelegramMessage(
-                    this.token,
-                    chatId,
-                    `📊 <b>庫存預測正在計算中...</b>\n\n伺服器目前正在讀取 DBF 銷售明細，請在 10 秒後直接點擊上一次產生的儀表板連結。`,
-                    myKeyboard
-                );
-                return;
-            }
 
-            isCalculatingForecast = true;
-            sendTelegramMessage(this.token, chatId, `⏳ <b>正在計算庫存預測...</b>\n正在從 ERP 分析最近 2 年銷售紀錄，請稍候約 10~30 秒...`, myKeyboard);
-            try {
-                const { urgentCount, watchCount, totalActive } = await generateForecastReport(false);
-                const leadDays = config.lowStockLeadTimeDays || 7;
-                const minSales = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
-
-                let reply = `📊 <b>智慧庫存預測報告（摘要）</b>\n`;
-                reply += `共 <b>${totalActive}</b> 項活躍商品 | 補貨週期：${leadDays} 工作天\n`;
-                reply += `<i>（已自動過濾 2 年銷量 &lt;${minSales} 件之不活躍商品及零庫存死品）</i>\n`;
-                reply += `-----------------------------------\n\n`;
-                if (urgentCount === 0 && watchCount === 0) {
-                    reply += `✅ <b>太棒了！目前庫存全部充裕。</b>\n所有活躍商品庫存均高於 ${leadDays} 工作天安全水位。`;
-                } else {
-                    reply += `🔴 <b>緊急補貨（不足 ${leadDays} 工作天存量）：${urgentCount} 項</b>\n`;
-                    reply += `🟡 <b>建議關注（存量 ${leadDays}~30 天）：${watchCount} 項</b>\n\n`;
-                    reply += `👉 點選下方按鈕開啟完整儀表板\n可搜尋品名、依廠商篩選、或匯出 CSV 報表。`;
-                }
-
-                // 嘗試從 active_url.txt 取得 Localtunnel 外網 URL，產生儀表板連結 (排除問號後面可能的 token 參數避免二次拼接錯誤)
-                let dashboardUrl = 'http://localhost:3000/forecast';
-                try {
-                    if (fs.existsSync(ACTIVE_URL_PATH)) {
-                        const rawUrl = fs.readFileSync(ACTIVE_URL_PATH, 'utf8').trim();
-                        if (rawUrl) {
-                            let baseUrl = rawUrl;
-                            if (rawUrl.includes('?')) {
-                                baseUrl = rawUrl.split('?')[0];
-                            }
-                            baseUrl = baseUrl.replace(/\/+$/, '');
-                            const apiToken = require('./config.json').apiToken || '';
-                            dashboardUrl = `${baseUrl}/forecast${apiToken ? '?token=' + apiToken : ''}`;
-                        }
-                    }
-                } catch (e) { /* 讀取失敗時使用本機 URL */ }
-
-                const inlineKeyboard = {
-                    inline_keyboard: [[
-                        { text: '📊 開啟完整庫存預測儀表板', url: dashboardUrl }
-                    ]]
-                };
-
-                sendTelegramMessage(this.token, chatId, reply, inlineKeyboard);
-            } catch (err) {
-                sendTelegramMessage(this.token, chatId, `⚠️ 庫存預測計算失敗：${err.message}`, myKeyboard);
-            } finally {
-                isCalculatingForecast = false;
-            }
-            return;
-        }
 
         // 處理盤點網址指令 (從 active_url.txt 讀取)
         if (text === '盤點' || text.toLowerCase() === '/take' || text === '📋 開始盤點') {
@@ -1395,7 +1153,8 @@ function reconcileBots() {
     // 停止不再需要輪詢的機器人
     for (const [token, instance] of activeBots.entries()) {
         const found = newBots.find(b => b.token === token);
-        if (!found || (!found.features.includes('query') && !found.features.includes('take') && !found.features.includes('history'))) {
+        const features = found && found.features ? found.features : [];
+        if (!found || (!features.includes('query') && !features.includes('take') && !features.includes('history'))) {
             console.log(`[系統] 停止機器人 [${instance.name}] 的輪詢服務`);
             instance.stop();
             activeBots.delete(token);
@@ -1406,7 +1165,8 @@ function reconcileBots() {
     for (const botConfig of newBots) {
         if (!botConfig.token) continue;
         
-        const needsPolling = botConfig.features.includes('query') || botConfig.features.includes('take') || botConfig.features.includes('history');
+        const features = botConfig.features || [];
+        const needsPolling = features.includes('query') || features.includes('take') || features.includes('history');
         
         if (!needsPolling) {
             if (activeBots.has(botConfig.token)) {
@@ -1454,217 +1214,6 @@ function updateGlobalBotChats(token, authorizedChats) {
     }
 }
 
-// 6. 每日定時低庫存推播模組
-let lastPushDateTime = '';
-
-function checkScheduledPush() {
-    const now = new Date();
-    const twTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
-    const year = twTime.getUTCFullYear();
-    const month = String(twTime.getUTCMonth() + 1).padStart(2, '0');
-    const date = String(twTime.getUTCDate()).padStart(2, '0');
-    const hours = String(twTime.getUTCHours()).padStart(2, '0');
-    const minutes = String(twTime.getUTCMinutes()).padStart(2, '0');
-    
-    const currentTimeStr = `${hours}:${minutes}`;
-    const currentDateTimeStr = `${year}-${month}-${date} ${currentTimeStr}`;
-
-    if (config.pushTimes.includes(currentTimeStr) && lastPushDateTime !== currentDateTimeStr) {
-        lastPushDateTime = currentDateTimeStr;
-        console.log(`[排程] 觸發定時推播，時間點: ${currentTimeStr}`);
-        triggerLowStockPush();
-    }
-}
-
-async function triggerLowStockPush() {
-    const pushBots = config.bots.filter(b => b.features && b.features.includes('push') && b.token && b.authorizedChats && b.authorizedChats.length > 0);
-    if (pushBots.length === 0) {
-        console.log('[排程] 尚未有任何機器人啟用「庫存推播」或無授權聊天室，取消本次推播。');
-        return;
-    }
-
-    try {
-        let data;
-        try {
-            // 嘗試從本地的 take_server (Port 3000) 獲取背景已預算好的庫存預測資料
-            data = await new Promise((resolve, reject) => {
-                const req = http.get('http://127.0.0.1:3000/api/forecast', { timeout: 2000 }, (res) => {
-                    if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-                    let body = '';
-                    res.on('data', chunk => body += chunk);
-                    res.on('end', () => {
-                        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-                    });
-                });
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            });
-            console.log(`[排程] 成功使用本地 Web Server 預估快取進行每日推播。`);
-        } catch (localErr) {
-            console.warn(`[排程] 無法獲取本地 Web Server 快取 (${localErr.message})，將降級為同步讀取 DBF 計算...`);
-            // 降級：如果本地服務掛了，無縫退回到傳統的同步掃描與計算
-            const allItems = readStockDb(config.databasePath, null, false);
-            const activeItems = allItems.filter(item => {
-                const name = item.NAME || '';
-                return !name.includes('停產') && !name.includes('停用') && !name.includes('停售');
-            });
-            const thresholds = calcDynamicThresholds();
-            const fallback = config.lowStockFallback !== undefined ? config.lowStockFallback : 5;
-            const leadDays = config.lowStockLeadTimeDays || 7;
-            const syncReport = generateForecastReportSync(false);
-            
-            // 將結構對齊以統一後續處理邏輯
-            data = {
-                items: activeItems.map(item => {
-                    const th = thresholds[item.NO];
-                    const daysLeft = th && th.avgDailyWork > 0 ? Math.round(item.INVQT / th.avgDailyWork) : null;
-                    let level = 'healthy';
-                    if (th) {
-                        if (item.INVQT <= th.lowWater) {
-                            level = (daysLeft !== null && daysLeft <= leadDays) ? 'urgent' : 'watch';
-                        }
-                    } else if (item.INVQT > 0 && item.INVQT <= fallback) {
-                        level = 'urgent';
-                    }
-                    return {
-                        no: item.NO.trim(),
-                        name: item.NAME.trim(),
-                        unit: item.UNIT.trim(),
-                        stock: item.INVQT,
-                        daysLeft,
-                        level,
-                        avgMonthly: th ? th.avgMonthly : null,
-                        lowWater: th ? th.lowWater : null
-                    };
-                }),
-                meta: {
-                    leadDays,
-                    urgentCount: syncReport.urgentCount,
-                    watchCount: syncReport.watchCount,
-                    totalActive: syncReport.totalActive,
-                    reportText: syncReport.report
-                }
-            };
-        }
-
-        // 庫存快照（偵測剛斷貨）
-        let previousStockMap = {};
-        if (fs.existsSync(SNAPSHOT_PATH)) {
-            try { previousStockMap = JSON.parse(fs.readFileSync(SNAPSHOT_PATH, 'utf8')); }
-            catch (e) { console.error('[排程] 載入庫存快照失敗:', e.message); }
-        }
-
-        const zeroStockTransitions = [];
-        
-        // 偵測剛斷貨商品
-        for (const item of data.items) {
-            const currentStock = item.stock || 0;
-            const previousStock = previousStockMap[item.no];
-            if (previousStock !== undefined && previousStock > 0 && currentStock <= 0) {
-                zeroStockTransitions.push({
-                    item: { NAME: item.name, NO: item.no, UNIT: item.unit, INVQT: item.stock },
-                    previousStock
-                });
-            }
-        }
-
-        // 更新庫存快照
-        const currentStockMap = {};
-        for (const item of data.items) { currentStockMap[item.no] = item.stock || 0; }
-        try {
-            fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(currentStockMap, null, 2), 'utf8');
-            console.log(`[排程] 庫存快照已更新。活動商品: ${data.items.length}`);
-        } catch (e) { console.error('[排程] 寫入庫存快照失敗:', e.message); }
-
-        const isFirstRun = Object.keys(previousStockMap).length === 0;
-        const timeStr = lastPushDateTime.split(' ')[1] || '';
-
-        let reply = '';
-
-        // 斷貨警報
-        if (zeroStockTransitions.length > 0) {
-            reply += `🔴 <b>【斷貨警報 (剛變為 0 庫存)】</b>\n`;
-            zeroStockTransitions.forEach(({ item, previousStock }) => {
-                reply += `• <b>${item.NAME}</b> (<code>${item.NO}</code>)\n`;
-                reply += `  狀態：庫存已歸零 🚫 (原庫存：${previousStock} ${item.UNIT || '個'})\n\n`;
-            });
-            reply += `-----------------------------------\n\n`;
-        }
-
-        // 動態低水位警報 (優先使用預算好的文字，若無則生成)
-        let reportText = data.meta.reportText;
-        if (reportText === undefined) {
-            // 由 cached items 生成
-            const leadDays = data.meta.leadDays || 7;
-            const leadDaysText = `${leadDays} 工作天`;
-            const urgent = data.items.filter(i => i.level === 'urgent');
-            const watch = data.items.filter(i => i.level === 'watch');
-            urgent.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
-            watch.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
-
-            let report = '';
-            if (urgent.length > 0) {
-                report += `🔴 <b>【緊急補貨 - 庫存不足 ${leadDaysText}】</b>\n`;
-                urgent.slice(0, 15).forEach((i) => {
-                    report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
-                    if (i.lowWater !== null) {
-                        report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 低水位：${i.lowWater}\n`;
-                        report += `  ⏰ 預估僅剩 <b>${i.daysLeft} 工作天</b> 存量\n\n`;
-                    } else {
-                        report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} （無出貨紀錄，庫存偏低）\n\n`;
-                    }
-                });
-                if (urgent.length > 15) report += `  <i>...還有 ${urgent.length - 15} 筆緊急品項</i>\n`;
-                report += `-----------------------------------\n\n`;
-            }
-
-            if (watch.length > 0) {
-                report += `🟡 <b>【需關注 - 庫存約 ${leadDaysText}~30 天】</b>\n`;
-                watch.slice(0, 10).forEach((i) => {
-                    report += `• <b>${i.name}</b> (<code>${i.no}</code>)\n`;
-                    report += `  📦 庫存：<b>${i.stock}</b> ${i.unit} | 月均：${i.avgMonthly} | 預估剩 <b>${i.daysLeft} 天</b>\n\n`;
-                });
-                if (watch.length > 10) report += `  <i>...還有 ${watch.length - 10} 筆需關注品項</i>\n`;
-                report += `-----------------------------------\n\n`;
-            }
-            reportText = report;
-        }
-
-        if (reportText) {
-            reply += reportText;
-        }
-
-        if (reply === '') {
-            if (isFirstRun) {
-                reply = `✅ <b>智慧庫存系統初始化完成 (${timeStr})</b>\n\n目前所有商品庫存均高於安全水位（補貨週期 ${data.meta.leadDays || 7} 工作天）。\n已建立庫存對照快照，後續將即時偵測斷貨。`;
-            } else {
-                console.log('[排程] 今日無缺貨商品且庫存充裕，不發送 Telegram 訊息。');
-                return;
-            }
-        } else {
-            const urgentCount = data.meta.urgentCount;
-            const watchCount = data.meta.watchCount;
-            reply = `🔔 <b>智慧庫存低水位日報 (${timeStr})</b>\n📊 補貨週期：${data.meta.leadDays || 7} 工作天 | 🔴 緊急：${urgentCount} 項 | 🟡 關注：${watchCount} 項\n\n` + reply;
-        }
-
-        for (const bot of pushBots) {
-            const myKeyboard = getBotKeyboard(bot);
-            for (const chatId of bot.authorizedChats) {
-                sendTelegramMessage(bot.token, chatId, reply, myKeyboard);
-            }
-        }
-    } catch (err) {
-        console.error('[排程推播錯誤]', err.message);
-        const errMsg = `⚠️ <b>庫存排程推報錯誤</b>：\n無法讀取 ERP 資料庫檔，可能資料庫正被獨佔備份或鎖定中。\n(原因: ${err.message})`;
-        for (const bot of pushBots) {
-            const myKeyboard = getBotKeyboard(bot);
-            for (const chatId of bot.authorizedChats) {
-                sendTelegramMessage(bot.token, chatId, errMsg, myKeyboard);
-            }
-        }
-    }
-}
-
 // 7. 啟動程序
 console.log('=============================================');
 console.log('       Visual FoxPro ERP Telegram Bot        ');
@@ -1677,10 +1226,6 @@ reconcileBots();
 setupConfigWatcher();
 
 console.log(`[系統] Telegram Bot 動態協調管理器已開啟。`);
-
-// 啟動排程定時檢查 (每 30 秒檢查一次時間)
-setInterval(checkScheduledPush, 30000);
-console.log(`[系統] 定時排程器已啟動。每天推播時間點: [${config.pushTimes.join(', ')}]`);
 
 console.log('---------------------------------------------');
 console.log('服務運行中，可按 Ctrl+C 結束。');

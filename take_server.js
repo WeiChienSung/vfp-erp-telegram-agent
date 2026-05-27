@@ -59,52 +59,7 @@ function loadConfig() {
     }
 }
 
-// 庫存預測記憶體快取
-let forecastCache = null;
-let forecastCacheTime = 0;
-const FORECAST_CACHE_MS = 5 * 60 * 1000; // 快取 5 分鐘
-let isCalculatingForecastBackground = false;
 
-// 背景自動重新整理快取 (使用 Worker Thread 進行物理隔離運算，防止同步 DBF 讀取阻塞主 Event Loop 導致 502 Bad Gateway)
-function refreshForecastCacheBackground() {
-    if (isCalculatingForecastBackground) return;
-    isCalculatingForecastBackground = true;
-    console.log('[背景快取] 啟動獨立工作線程 (Worker Thread) 計算庫存預測...');
-
-    const start = Date.now();
-    
-    // 建立背景工作線程，傳送計算所需的設定參數
-    const worker = new Worker(path.join(__dirname, 'forecast_worker.js'), {
-        workerData: {
-            databasePath: config.databasePath,
-            lowStockLeadTimeDays: config.lowStockLeadTimeDays,
-            lowStockFallback: config.lowStockFallback,
-            lowStockMin2YearSales: config.lowStockMin2YearSales,
-            priorityProducts: config.priorityProducts
-        }
-    });
-
-    worker.on('message', (message) => {
-        if (message.success) {
-            forecastCache = message.data;
-            forecastCacheTime = Date.now();
-            console.log(`[背景快取] 計算完成。耗時 ${Date.now() - start} ms。活躍品項: ${forecastCache.meta.totalActive}`);
-        } else {
-            console.error('[背景快取] 計算出錯:', message.error);
-        }
-    });
-
-    worker.on('error', (err) => {
-        console.error('[背景快取] 工作線程發生未捕獲異常:', err.message);
-    });
-
-    worker.on('exit', (code) => {
-        isCalculatingForecastBackground = false;
-        if (code !== 0) {
-            console.error(`[背景快取] 工作線程異常退出，代碼: ${code}`);
-        }
-    });
-}
 
 // 盤點上傳工作佇列，序列化寫入 DBF 避免並發鎖定衝突
 const uploadQueue = [];
@@ -138,7 +93,24 @@ function processUploadQueue() {
         ps.stdout.on('data', data => psOutput += data.toString());
         ps.stderr.on('data', data => psOutput += data.toString());
 
+        let hasClosed = false;
+        const timeoutTimer = setTimeout(() => {
+            if (hasClosed) return;
+            console.error(`[系統] 盤點寫入進程超時 (12秒)，強制關閉進程...`);
+            try {
+                if (process.platform === 'win32') {
+                    spawn('taskkill', ['/F', '/T', '/PID', String(ps.pid)]);
+                } else {
+                    ps.kill('SIGKILL');
+                }
+            } catch (e) {
+                console.error('[系統] 強制關閉進程出錯:', e.message);
+            }
+        }, 12000);
+
         ps.on('close', code => {
+            hasClosed = true;
+            clearTimeout(timeoutTimer);
             try { fs.unlinkSync(tempJsonPath); } catch(e) {}
             isProcessingUpload = false;
             
@@ -168,8 +140,6 @@ function processUploadQueue() {
 fs.watchFile(CONFIG_PATH, (curr, prev) => {
     console.log('[系統] 偵測到設定檔 config.json 有變更，自動重新載入...');
     loadConfig();
-    forecastCache = null;
-    refreshForecastCacheBackground(); // 設定檔變更後立即觸發背景重算
 });
 
 // 2. 唯讀解析 Visual FoxPro DBF 檔案 (與 ERP 隨身查同步)
@@ -189,6 +159,17 @@ function normalizeText(str) {
         .replace(/纸/g, '紙')
         .replace(/寸/g, '吋')
         .replace(/尺/g, '呎');
+}
+
+function sleepSync(ms) {
+    try {
+        const sab = new SharedArrayBuffer(4);
+        const int32 = new Int32Array(sab);
+        Atomics.wait(int32, 0, 0, ms);
+    } catch (e) {
+        const start = Date.now();
+        while (Date.now() - start < ms) {}
+    }
 }
 
 function readStockDb(dbPath, keyword = null) {
@@ -211,9 +192,7 @@ function readStockDb(dbPath, keyword = null) {
                 throw err;
             }
             console.warn(`[資料庫] 讀取資料庫被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
-            // 同步等待 delay ms
-            const start = Date.now();
-            while (Date.now() - start < delay) {}
+            sleepSync(delay);
         }
     }
     
@@ -389,172 +368,7 @@ function sendTelegramMessage(token, chatId, text) {
     req.end();
 }
 
-// =============================================
-// 庫存預測計算引擎（供 /api/forecast 使用）
-// =============================================
-function queryDbfSimple(dbPath, filterFn, fieldsNeeded) {
-    // 精簡版 DBF 掃描器（供 take_server.js 內部使用，不依賴 queryDbfOptimized）
-    if (!fs.existsSync(dbPath)) return;
-    
-    let buf;
-    let retries = 3;
-    let delay = 150; // 毫秒
-    
-    while (retries > 0) {
-        try {
-            buf = fs.readFileSync(dbPath);
-            break;
-        } catch (err) {
-            retries--;
-            if (retries === 0) {
-                console.error(`[資料庫] 掃描讀取資料庫失敗，已達最大重試次數: ${err.message}`);
-                throw err;
-            }
-            console.warn(`[資料庫] 掃描讀取資料庫被鎖定或忙碌，剩餘重試次數 ${retries}，將於 ${delay}ms 後重試...`);
-            // 同步等待 delay ms
-            const start = Date.now();
-            while (Date.now() - start < delay) {}
-        }
-    }
-    
-    const recordCount = buf.readInt32LE(4);
-    const headerLen   = buf.readInt16LE(8);
-    const recordLen   = buf.readInt16LE(10);
 
-    const fields = [];
-    let off = 32;
-    let recOff = 1;
-    while (off < headerLen - 1) {
-        const fb = buf.subarray(off, off + 32);
-        if (fb[0] === 0x0D) break;
-        let ne = 0;
-        while (ne < 11 && fb[ne] !== 0) ne++;
-        const name = fb.subarray(0, ne).toString('ascii').trim();
-        const type = String.fromCharCode(fb[11]);
-        const len  = fb[16];
-        if (!fieldsNeeded || fieldsNeeded.includes(name)) {
-            fields.push({ name, type, len, off: recOff });
-        }
-        recOff += len;
-        off += 32;
-    }
-
-    const big5 = new TextDecoder('big5');
-    for (let r = 0; r < recordCount; r++) {
-        const pos = headerLen + r * recordLen;
-        if (pos + recordLen > buf.length) break;
-        if (buf[pos] === 0x2A) continue;
-        const rb = buf.subarray(pos, pos + recordLen);
-        const record = {};
-        for (const f of fields) {
-            const raw = rb.subarray(f.off, f.off + f.len);
-            if (f.type === 'N') {
-                record[f.name] = parseFloat(raw.toString('ascii').trim()) || 0;
-            } else {
-                let end = raw.length;
-                while (end > 0 && (raw[end-1] === 0x20 || raw[end-1] === 0x00)) end--;
-                record[f.name] = big5.decode(raw.subarray(0, end));
-            }
-        }
-        filterFn(record);
-    }
-}
-
-function calcForecastData() {
-    const leadDays   = config.lowStockLeadTimeDays || 7;
-    const fallback   = config.lowStockFallback !== undefined ? config.lowStockFallback : 5;
-    const minSales   = config.lowStockMin2YearSales !== undefined ? config.lowStockMin2YearSales : 5;
-    const dbDir      = path.dirname(config.databasePath);
-    const ougo1Path  = path.join(dbDir, 'ougo1.dbf');
-
-    // 1. 計算 2 年銷售地圖
-    const salesMap = {};
-    if (fs.existsSync(ougo1Path)) {
-        const cutoff = new Date();
-        cutoff.setFullYear(cutoff.getFullYear() - 2);
-        const cutoffStr = cutoff.getFullYear().toString() +
-            String(cutoff.getMonth() + 1).padStart(2, '0') +
-            String(cutoff.getDate()).padStart(2, '0');
-
-        queryDbfSimple(ougo1Path, (rec) => {
-            const dat = (rec.DAT || '').trim();
-            if (dat.length >= 8 && dat >= cutoffStr) {
-                const mno = (rec.MNO || '').trim();
-                const qut = parseFloat(rec.QUT) || 0;
-                if (mno && qut > 0) salesMap[mno] = (salesMap[mno] || 0) + qut;
-            }
-        }, ['DAT', 'MNO', 'QUT']);
-    }
-
-    // 2. 讀取庫存資料並計算各商品狀態
-    const allStock = readStockDb(config.databasePath);
-    const WORK_DAYS_MONTH = 22;
-    const MONTHS = 24;
-
-    const items = [];
-    for (const item of allStock) {
-        const name = item.NAME || '';
-        if (name.includes('停產') || name.includes('停用') || name.includes('停售')) continue;
-
-        const stock = item.INVQT || 0;
-        if (stock < 0) continue; // 排除負庫存（ERP 資料異常，如未入帳退貨）
-        const totalQut = salesMap[item.NO];
-
-        let level, daysLeft = null, avgMonthly = null, avgDailyWork = null, lowWater = null;
-
-        if (totalQut && totalQut >= minSales) {
-            avgMonthly   = Math.round((totalQut / MONTHS) * 10) / 10;
-            avgDailyWork = Math.round((avgMonthly / WORK_DAYS_MONTH) * 10) / 10;
-            lowWater     = Math.max(Math.ceil(avgDailyWork * leadDays), 1);
-            daysLeft     = avgDailyWork > 0 ? Math.round(stock / avgDailyWork) : Infinity;
-
-            if (stock <= lowWater) {
-                level = daysLeft <= leadDays ? 'urgent' : 'watch';
-            } else {
-                level = 'healthy';
-            }
-        } else {
-            // 無銷售紀錄：庫存 > 0 且 <= fallback 才算緊急，0 庫存不算
-            if (stock > 0 && stock <= fallback) {
-                level = 'urgent';
-            } else {
-                level = 'healthy';
-            }
-        }
-
-        items.push({
-            no:         (item.NO   || '').trim(),
-            name:       (item.NAME || '').trim(),
-            unit:       (item.UNIT || '').trim(),
-            bno:        (item.BNO  || '').trim(),
-            stock,
-            avgMonthly,
-            avgDailyWork,
-            lowWater,
-            daysLeft:   daysLeft === Infinity ? null : daysLeft,
-            level
-        });
-    }
-
-    const urgent  = items.filter(i => i.level === 'urgent').length;
-    const watch   = items.filter(i => i.level === 'watch').length;
-    const healthy = items.filter(i => i.level === 'healthy').length;
-
-    return {
-        items,
-        meta: {
-            totalActive: items.length,
-            urgentCount: urgent,
-            watchCount:  watch,
-            healthyCount: healthy,
-            leadDays,
-            minSales,
-            fallback,
-            priorityProducts: config.priorityProducts || [],
-            generatedAt: new Date().toISOString()
-        }
-    };
-}
 
 // =============================================
 // HTTP 網頁伺服器與 Localtunnel 安全通道
@@ -679,9 +493,9 @@ function startTunnel() {
                 // 寫入共用網址檔案，供 ERP 隨身查 Bot 查詢
                 fs.writeFileSync(ACTIVE_URL_PATH, tunnelUrl, 'utf8');
                 
-                // 主動發送訊息給管理員 (自愈重連時不發送以防打擾)
+                // 僅更新網址狀態，不主動發送 Telegram 啟動推播，避免重啟打擾同仁
                 if (isFirstTunnelConnection) {
-                    sendTunnelUrlToChats();
+                    console.log('[系統] 行動盤點助手啟動成功，已略過啟動 Telegram 推播以防打擾同仁。');
                     isFirstTunnelConnection = false;
                 } else {
                     console.log('[系統] 自愈重連成功，網址已更新，但不重複發送 Telegram 推播通知以防打擾。');
@@ -843,7 +657,8 @@ function startWebServer() {
         // 偵測是否為本地端請求 (防範 Localtunnel 代理穿透)
         const remoteIp = req.socket.remoteAddress;
         const host = req.headers.host || '';
-        const isHostLocal = host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('lvh.me');
+        const cleanHost = host.split(':')[0].toLowerCase();
+        const isHostLocal = cleanHost === 'localhost' || cleanHost === '127.0.0.1' || cleanHost === 'lvh.me';
         const hasForwarded = req.headers['x-forwarded-for'] || req.headers['x-forwarded-host'] || req.headers['x-forwarded-proto'];
         
         const isLocal = (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1') && isHostLocal && !hasForwarded;
@@ -887,21 +702,22 @@ function startWebServer() {
         } else if (pathname === '/config.js') {
             serveStaticFile(res, path.join(__dirname, 'public', 'config.js'), 'application/javascript; charset=utf-8');
         }
-        // 庫存預測儀表板路由
-        else if (pathname === '/forecast' || pathname === '/forecast.html') {
-            serveStaticFile(res, path.join(__dirname, 'public', 'forecast.html'), 'text/html; charset=utf-8');
-        } else if (pathname === '/forecast.css') {
-            serveStaticFile(res, path.join(__dirname, 'public', 'forecast.css'), 'text/css; charset=utf-8');
-        } else if (pathname === '/forecast.js') {
-            serveStaticFile(res, path.join(__dirname, 'public', 'forecast.js'), 'application/javascript; charset=utf-8');
-        }
+
         // API: 讀取設定檔 (限本機)
         else if (pathname === '/api/config' && req.method === 'GET') {
             try {
                 if (fs.existsSync(CONFIG_PATH)) {
                     const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+                    const parsed = JSON.parse(raw);
+                    // 遮蔽敏感憑證，防止洩露
+                    if (parsed.apiToken) parsed.apiToken = '******';
+                    if (parsed.bots && Array.isArray(parsed.bots)) {
+                        parsed.bots.forEach(bot => {
+                            if (bot.token) bot.token = '******';
+                        });
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-                    res.end(raw);
+                    res.end(JSON.stringify(parsed, null, 2));
                 } else {
                     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
                     res.end(JSON.stringify({ error: '設定檔不存在' }));
@@ -921,6 +737,23 @@ function startWebServer() {
                     // 基本結構寫回檢驗
                     if (!parsed.databasePath) throw new Error('資料庫路徑不可為空');
                     if (!parsed.bots || !Array.isArray(parsed.bots)) throw new Error('bots 必須是陣列格式');
+                    
+                    // 防寫回遮蔽 ******
+                    let oldConfig = {};
+                    if (fs.existsSync(CONFIG_PATH)) {
+                        try { oldConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch (e) {}
+                    }
+                    if (parsed.apiToken === '******') {
+                        parsed.apiToken = oldConfig.apiToken || '';
+                    }
+                    if (parsed.bots && oldConfig.bots) {
+                        parsed.bots.forEach(bot => {
+                            if (bot.token === '******') {
+                                const oldBot = oldConfig.bots.find(ob => ob.name === bot.name);
+                                if (oldBot) bot.token = oldBot.token;
+                            }
+                        });
+                    }
                     
                     fs.writeFileSync(CONFIG_PATH, JSON.stringify(parsed, null, 2), 'utf8');
                     console.log('[系統] 設定後台寫入 config.json 成功！');
@@ -943,33 +776,7 @@ function startWebServer() {
                 res.end(JSON.stringify({ error: err.message }));
             }
         }
-        // API: 庫存預測報告 (使用背景重新整理的記憶體快取，極速 1ms 回傳，防止同步阻塞斷線)
-        else if (pathname === '/api/forecast' && req.method === 'GET') {
-            try {
-                if (forecastCache) {
-                    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-                    res.end(JSON.stringify(forecastCache));
-                    return;
-                }
-                
-                // 如果背景工作線程正在計算中，則直接返回 Loading 狀態，決不進行同步計算阻塞主線程！
-                if (isCalculatingForecastBackground) {
-                    res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-                    res.end(JSON.stringify({ loading: true, message: '背景快取正在計算中，請在 5 秒後重新整理網頁...' }));
-                    return;
-                }
-                
-                console.log('[API /api/forecast] 快取尚未初始化，且未在計算中，觸發背景非同步重算...');
-                refreshForecastCacheBackground();
-                
-                res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ loading: true, message: '已啟動背景庫存預估計算，預計耗時 15 秒，請稍候...' }));
-            } catch (err) {
-                console.error('[API /api/forecast] 計算失敗:', err.message);
-                res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ error: err.message }));
-            }
-        }
+
         // API: 商品名單或搜尋
         else if (pathname === '/api/products' && req.method === 'GET') {
             const supplier = parsedUrl.searchParams.get('supplier');
@@ -1049,11 +856,6 @@ function startWebServer() {
     server.listen(3000, '0.0.0.0', () => {
         console.log('[系統] 盤點與設定後台網頁伺服器已啟動，監聽 Port 3000。');
         console.log('[系統] 本機設定後台入口：http://localhost:3000/config');
-        
-        // 啟動時立即觸發一次背景快取重新整理，防止 HTTP 請求排隊時阻塞主線程
-        refreshForecastCacheBackground();
-        // 定期每 5 分鐘在背景更新快取
-        setInterval(refreshForecastCacheBackground, FORECAST_CACHE_MS);
     });
 }
 
