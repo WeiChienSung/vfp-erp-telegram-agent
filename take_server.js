@@ -92,8 +92,8 @@ function startWebServer() {
         
         const isLocal = (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1') && isHostLocal && !hasForwarded;
 
-        // 設定後台僅限本機電腦開啟
-        if (!isLocal) {
+        // 設定後台與配置API僅限本機電腦開啟 (防止 Token 外洩)
+        if (!isLocal && (pathname === '/' || pathname.startsWith('/config') || pathname === '/api/config')) {
             res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
             res.end('403 Forbidden: 設定後台僅限在本機電腦 (http://localhost:3000/config) 開啟。');
             return;
@@ -170,7 +170,11 @@ function startWebServer() {
                         });
                     }
                     
-                    fs.writeFileSync(CONFIG_PATH, JSON.stringify(parsed, null, 2), 'utf8');
+                    // 🛡️ 採用原子寫入 (Write-then-Rename)，防範寫入中途異常斷電導致設定檔損毀
+                    const tempPath = CONFIG_PATH + '.tmp';
+                    fs.writeFileSync(tempPath, JSON.stringify(parsed, null, 2), 'utf8');
+                    fs.renameSync(tempPath, CONFIG_PATH);
+                    
                     console.log('[系統] 設定後台寫入 config.json 成功！');
                     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
                     res.end(JSON.stringify({ success: true }));

@@ -508,8 +508,8 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
         }
     }
     
-    // For small files (e.g. < 50MB), read entirely into memory for speed
-    if (fileSize < 50 * 1024 * 1024) {
+    // 🛡️ 僅小於 1MB 的極小檔案才讀入記憶體，避免大檔案 (如 20MB 銷貨歷史) 遍歷造成記憶體尖峰
+    if (fileSize < 1 * 1024 * 1024) {
         if (fd) {
             try { fs.closeSync(fd); } catch (e) {}
         }
@@ -527,6 +527,7 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
     const fields = [];
     let offset = 32;
     let currentRecordOffset = 1;
+    let delField = null;
 
     while (offset < headerLength - 1) {
         if (headerBuf[offset] === 0x0D) break;
@@ -536,12 +537,16 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
         const type = String.fromCharCode(headerBuf[offset + 11]);
         const len = headerBuf[offset + 16];
 
-        fields.push({
+        const fieldObj = {
             name,
             type,
             length: len,
             offset: currentRecordOffset
-        });
+        };
+        fields.push(fieldObj);
+        if (name === 'DEL') {
+            delField = fieldObj;
+        }
         currentRecordOffset += len;
         offset += 32;
     }
@@ -567,7 +572,12 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
             // Loop backward through the chunk in memory
             for (let r = numRecordsInChunk - 1; r >= 0; r--) {
                 const recOffset = r * recordLength;
-                if (chunkBuf[recOffset] === 0x2A) continue; // deleted
+                if (chunkBuf[recOffset] === 0x2A) continue; // physically deleted
+
+                if (delField) {
+                    const delByte = chunkBuf[recOffset + delField.offset];
+                    if (delByte === 0x59 || delByte === 0x79) continue; // soft-deleted (Y or y)
+                }
 
                 const record = {};
                 for (const f of fieldsToProcess) {
@@ -605,7 +615,12 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
             
             for (let r = 0; r < numRecordsInChunk; r++) {
                 const recOffset = r * recordLength;
-                if (chunkBuf[recOffset] === 0x2A) continue; // deleted
+                if (chunkBuf[recOffset] === 0x2A) continue; // physically deleted
+
+                if (delField) {
+                    const delByte = chunkBuf[recOffset + delField.offset];
+                    if (delByte === 0x59 || delByte === 0x79) continue; // soft-deleted (Y or y)
+                }
 
                 const record = {};
                 for (const f of fieldsToProcess) {
@@ -645,6 +660,7 @@ function queryDbfInMemory(dbPath, filterFn, options = {}) {
     const fields = [];
     let offset = 32;
     let currentRecordOffset = 1;
+    let delField = null;
 
     while (offset < headerLength - 1) {
         if (fileBuffer[offset] === 0x0D) break;
@@ -654,12 +670,16 @@ function queryDbfInMemory(dbPath, filterFn, options = {}) {
         const type = String.fromCharCode(fileBuffer[offset + 11]);
         const len = fileBuffer[offset + 16];
 
-        fields.push({
+        const fieldObj = {
             name,
             type,
             length: len,
             offset: currentRecordOffset
-        });
+        };
+        fields.push(fieldObj);
+        if (name === 'DEL') {
+            delField = fieldObj;
+        }
         currentRecordOffset += len;
         offset += 32;
     }
@@ -672,6 +692,11 @@ function queryDbfInMemory(dbPath, filterFn, options = {}) {
         const filePos = headerLength + (r * recordLength);
         if (filePos + recordLength > fileBuffer.length) return;
         if (fileBuffer[filePos] === 0x2A) return;
+
+        if (delField) {
+            const delByte = fileBuffer[filePos + delField.offset];
+            if (delByte === 0x59 || delByte === 0x79) return; // soft-deleted (Y or y)
+        }
 
         const recordBuf = fileBuffer.subarray(filePos, filePos + recordLength);
         const record = {};
@@ -999,7 +1024,70 @@ function sendTelegramMessage(token, chatId, text, replyMarkup = null, retryCount
     req.end();
 }
 
-
+// 3.1 雲端試算表欠貨查詢通訊模組
+function fetchBackordersFromSheets(webhookUrl) {
+    return new Promise((resolve, reject) => {
+        function performGet(urlStr) {
+            try {
+                const url = new URL(urlStr);
+                const options = {
+                    hostname: url.hostname,
+                    port: url.port || 443,
+                    path: url.pathname + url.search,
+                    method: 'GET',
+                    headers: {
+                        'User-Agent': 'Node-Telegram-Bot'
+                    }
+                };
+                
+                const req = https.request(options, (res) => {
+                    if (res.statusCode === 302 || res.statusCode === 301 || res.statusCode === 307) {
+                        const redirectUrl = res.headers.location;
+                        if (redirectUrl) {
+                            performGet(redirectUrl);
+                            return;
+                        }
+                    }
+                    
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`HTTP 錯誤狀態碼: ${res.statusCode}`));
+                        return;
+                    }
+                    
+                    let body = '';
+                    res.on('data', (chunk) => body += chunk);
+                    res.on('end', () => {
+                        try {
+                            const parsed = JSON.parse(body);
+                            if (parsed.status === 'success') {
+                                resolve(parsed.data || []);
+                            } else {
+                                reject(new Error(parsed.message || '查詢失敗'));
+                            }
+                        } catch (err) {
+                            reject(new Error('解析 Google 試算表資料失敗，請確認部署 URL 是否正確'));
+                        }
+                    });
+                });
+                
+                // 🛡️ 設定 10 秒逾時控制，避免雲端 Webhook 掛起造成 Bot socket 資源枯竭
+                req.setTimeout(10000, () => {
+                    req.destroy();
+                    reject(new Error('連線至雲端試算表逾時 (10秒)'));
+                });
+                
+                req.on('error', (err) => {
+                    reject(err);
+                });
+                req.end();
+            } catch (err) {
+                reject(err);
+            }
+        }
+        
+        performGet(webhookUrl);
+    });
+}
 
 // 格式化商品資訊
 function formatProductInfo(item) {
@@ -1033,6 +1121,9 @@ function getBotKeyboard(botInstance) {
     if (botInstance.name === 'BOT_1') {
         row1.push({"text": "⚙️ 管理後台"});
     }
+    
+    // 所有的機器人都有查詢未出貨按鈕
+    row1.push({"text": "📋 查詢未出貨"});
     
     const keyboard = [];
     if (row1.length > 0) keyboard.push(row1);
@@ -1168,52 +1259,173 @@ class TelegramBotInstance {
         const text = update.message.text.trim();
         const chatName = update.message.chat.title || update.message.chat.username || update.message.chat.first_name || '未知用戶';
 
-        const isSelf = this.name === 'BOT_1';
+        // 🛡️ 安全防禦 1：全域輸入長度限制 (DoS 防禦)
+        if (text.length > 200) {
+            sendTelegramMessage(this.token, chatId, `⚠️ <b>輸入長度過長</b>\n\n請縮短您的查詢關鍵字（限制 200 字元內）。`);
+            return;
+        }
 
-        // 動態決定使用自訂鍵盤
+        // 🛡️ 安全防禦 2：限制關鍵字切分個數，避免對快取執行海量掃描造成 CPU 阻塞
+        const tempWords = text.split(/[\s　]+/g).filter(w => w.length >= 1);
+        if (tempWords.length > 5) {
+            sendTelegramMessage(this.token, chatId, `⚠️ <b>關鍵字數量過多</b>\n\n為維護系統效能，最多僅支援 5 個關鍵字。`);
+            return;
+        }
+
+        // 🛡️ 安全防禦 3：將限流防刷邏輯移至最前方 (避免 Flooding Google Sheets 或 config.json 寫入)
+        const now = Date.now();
+        const lastQuery = userLastQueryTime[chatId] || 0;
+        if (now - lastQuery < 1500) {
+            console.log(`[防刷 - ${this.name}] 攔截來自 [${chatName}] (${chatId}) 的頻繁請求`);
+            sendTelegramMessage(
+                this.token,
+                chatId,
+                `⚠️ <b>您的查詢頻率過快</b>\n\n系統正在為其他同仁服務，請稍候 1.5 秒後再試。`
+            );
+            return;
+        }
+        userLastQueryTime[chatId] = now;
+
+        const isSelf = this.name === 'BOT_1';
         const myKeyboard = getBotKeyboard(this);
 
         console.log(`[訊息 - ${this.name}] 收到來自 [${chatName}] (${chatId}) 的訊息: "${text}"`);
 
+        const isAuthorized = this.authorizedChats.includes(chatId);
+
         // 處理 /start 或 /register 註冊指令
         if (text === '/start' || text.startsWith('/register')) {
-            if (!this.authorizedChats.includes(chatId)) {
-                this.authorizedChats.push(chatId);
-                
-                updateGlobalBotChats(this.token, this.authorizedChats);
-                
+            if (!isAuthorized) {
+                // 🛡️ 安全防禦 4：取消自動註冊寫入 config.json 機制，改為顯示 ID 由管理員手動勾選
                 sendTelegramMessage(
                     this.token,
                     chatId, 
-                    `🎉 <b>註冊成功！</b>\n\n本聊天室已成功加入「${this.name}」的授權清單。\n\n<b>🔍 啟用功能：</b>\n${this.features.map(f => {
-                        if (f === 'query') return '• 價格與庫存查詢 🔍';
-                        if (f === 'history') return '• 客戶歷史售價查詢 💰';
-                        return f;
-                    }).join('\n')}\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n\n💡 <b>小技巧</b>：可輸入多個關鍵字（用空白分開）來精確搜尋商品。例如輸入「<code>3m 膚色 1吋</code>」會找同時符合這三個詞的商品。`,
+                    `👋 <b>您好！您的聊天室 ID 為：</b> <code>${chatId}</code>\n\n⚠️ 目前本聊天室尚未獲得「${this.name}」的存取授權。\n\n請將上方 ID 提供給管理員，由管理員在 ERP 隨身查本機管理後台為您勾選授權後即可開始使用。`,
                     myKeyboard
                 );
-                console.log(`[註冊 - ${this.name}] 已成功註冊新聊天室: [${chatName}] (${chatId})`);
+                console.log(`[安全性 - ${this.name}] 拒絕未授權聊天室的註冊請求並引導手動審核: [${chatName}] (${chatId})`);
             } else {
-                sendTelegramMessage(this.token, chatId, `ℹ️ <b>提示</b>：本聊天室先前已經註冊過了！\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n\n💡 <b>小技巧</b>：可輸入多個關鍵字（用空白分開）來精確搜尋商品。例如輸入「<code>3m 膚色 1吋</code>」會找同時符合這三個詞的商品。`, myKeyboard);
+                sendTelegramMessage(this.token, chatId, `ℹ️ <b>提示</b>：本聊天室已獲授權！\n\n直接輸入<b>商品名稱</b>或<b>商品編號</b>即可查詢。\n\n💡 <b>小技巧</b>：可輸入多個關鍵字（用空白分開）來精確搜尋商品。例如輸入「<code>3m 膚色 1吋</code>」會找同時符合這三個詞的商品。`, myKeyboard);
             }
             return;
         }
 
-        // 🛡️ 授權白名單安全守衛 (防範未授權對話進行查詢與操作設定)
-        if (!this.authorizedChats.includes(chatId)) {
+        // 🛡️ 安全防禦 5：授權白名單安全守衛
+        if (!isAuthorized) {
             console.log(`[安全性 - ${this.name}] 拒絕未授權聊天室的存取請求: [${chatName}] (${chatId})`);
             sendTelegramMessage(
                 this.token,
                 chatId,
-                `⚠️ <b>未獲授權的聊天室</b>\n\n本聊天室（ID: <code>${chatId}</code>）尚未獲得本系統授權，無法使用此機器人。\n\n💡 同仁請在本對話框中發送 <code>/start</code> 進行註冊，並請管理員於設定後台進行勾選授權與儲存。`,
+                `⚠️ <b>未獲授權的聊天室</b>\n\n本聊天室（ID: <code>${chatId}</code>）尚未獲得本系統授權，無法使用此機器人。\n\n💡 請先發送 <code>/start</code> 取得 ID 並聯繫管理員手動開通授權。`,
                 myKeyboard
             );
             return;
         }
 
-        // 處理管理後台網址指令 (僅限管理員機器人 BOT_1)
+        // 處理雲端試算表欠貨/未出貨查詢
+        let isBackorderQuery = false;
+        let backorderFilter = '';
+        const cleanText = text.replace(/^[📋📊🔍✏️⚙️🛠️❌⚠️✅ℹ️🎉🛒💵💰📅🏢📦]+/, '').trim();
+        
+        if (cleanText.startsWith('查詢未出貨')) {
+            isBackorderQuery = true;
+            backorderFilter = cleanText.slice(5).trim();
+        } else if (cleanText.startsWith('未出貨')) {
+            isBackorderQuery = true;
+            backorderFilter = cleanText.slice(3).trim();
+        } else if (cleanText.startsWith('後送')) {
+            const suffix = cleanText.slice(2).trim();
+            if (suffix === '' || (!suffix.includes('+') && !/\d/.test(suffix))) {
+                isBackorderQuery = true;
+                backorderFilter = suffix;
+            }
+        }
+
+        if (isBackorderQuery) {
+            const webhookUrl = config.backorderWebhookUrl;
+            if (!webhookUrl || webhookUrl.includes('您的網頁應用程式網址')) {
+                sendTelegramMessage(
+                    this.token,
+                    chatId,
+                    `⚠️ <b>未設定雲端同步網址</b>\n\n系統尚未設定 Google 試算表的 Webhook 網址，因此無法查詢未出貨資料。\n\n💡 請管理員先建立新版 Google 試算表，完成部署後，將 Webhook 網址填入本機 <code>config.json</code> 中的 <code>backorderWebhookUrl</code> 欄位。`,
+                    myKeyboard
+                );
+                return;
+            }
+            
+            sendTelegramMessage(this.token, chatId, `⏳ 正在連線至雲端試算表查詢未出貨資料...`, myKeyboard);
+            
+            try {
+                const backorders = await fetchBackordersFromSheets(webhookUrl);
+                
+                let filtered = backorders;
+                if (backorderFilter) {
+                    const normFilter = normalizeText(backorderFilter);
+                    filtered = backorders.filter(bo => {
+                        return normalizeText(bo.customerName).includes(normFilter) || 
+                               normalizeText(bo.customerNo).includes(normFilter);
+                    });
+                }
+                
+                if (filtered.length === 0) {
+                    let reply = `🔍 <b>未出貨明細查詢結果</b>\n`;
+                    if (backorderFilter) {
+                        reply += `🏢 客戶關鍵字：<code>${backorderFilter}</code>\n\n`;
+                        reply += `🟢 找不到符合該客戶的未出貨欠貨紀錄！`;
+                    } else {
+                        reply += `\n🟢 <b>當前沒有任何未出貨欠貨紀錄！</b>`;
+                    }
+                    sendTelegramMessage(this.token, chatId, reply, myKeyboard);
+                    return;
+                }
+                
+                let reply = `📋 <b>未出貨欠貨清單（共 ${filtered.length} 筆）：</b>\n`;
+                if (backorderFilter) {
+                    reply += `🏢 篩選客戶：<code>${backorderFilter}</code>\n`;
+                }
+                reply += `-----------------------------------\n\n`;
+                
+                const displayLimit = 30;
+                const displayCount = Math.min(filtered.length, displayLimit);
+                
+                for (let i = 0; i < displayCount; i++) {
+                    const bo = filtered[i];
+                    const dateStr = bo.time || '無日期';
+                    const custStr = bo.customerName || '未知客戶';
+                    const prodStr = bo.productName || '未知商品';
+                    const paid = parseInt(bo.paidQty) || 0;
+                    const free = parseInt(bo.freeQty) || 0;
+                    const stockStatus = bo.stockStatus || '';
+                    
+                    let qtyStr = '';
+                    if (paid > 0 && free > 0) {
+                        qtyStr = `${paid}+${free}`;
+                    } else if (paid > 0) {
+                        qtyStr = `${paid}`;
+                    } else if (free > 0) {
+                        qtyStr = `${free} (贈)`;
+                    }
+                    
+                    const remarkTip = bo.manualRemark ? ` <i>(${bo.manualRemark})</i>` : '';
+                    reply += `• 🏢 <b>${custStr}</b>\n  └─ ${prodStr} (欠 <b>${qtyStr}</b>) ${stockStatus}${remarkTip}\n\n`;
+                }
+                
+                if (filtered.length > displayLimit) {
+                    reply += `<i>...還有 ${(filtered.length - displayLimit)} 筆未列出，請利用更精確的客戶名稱查詢。</i>`;
+                }
+                
+                sendTelegramMessage(this.token, chatId, reply, myKeyboard);
+            } catch (err) {
+                console.error('[Telegram 欠貨查詢錯誤]', err.message);
+                sendTelegramMessage(this.token, chatId, `❌ <b>雲端查詢失敗</b>\n\n無法讀取 Google 試算表資料。\n(原因: ${err.message})`, myKeyboard);
+            }
+            return;
+        }
+
+        // 處理管理後台網址指令 (僅限管理員機器人 BOT_1，並額外比對管理員 chatID 進行雙重防護)
         if (text === '設定' || text.toLowerCase() === '/config' || text === '⚙️ 管理後台') {
-            if (isSelf) {
+            const adminChatId = 5976208790; // 超級管理員預設 ID
+            if (isSelf && chatId === adminChatId) {
                 const inlineKeyboard = {
                     inline_keyboard: [
                         [
@@ -1231,28 +1443,12 @@ class TelegramBotInstance {
                     inlineKeyboard
                 );
                 return;
+            } else if (isSelf) {
+                sendTelegramMessage(this.token, chatId, `⚠️ <b>權限不足</b>\n\n您無權獲取管理後台連結。如有設定需求，請聯繫系統管理員。`, myKeyboard);
+                return;
             }
             // 若非管理員機器人，則不攔截命令，流向商品搜尋以作偽裝
         }
-
-
-
-
-
-        // 🛡️ 限流防刷限制 (1.5 秒限制 1 次商品/歷史價格查詢)
-        const now = Date.now();
-        const lastQuery = userLastQueryTime[chatId] || 0;
-        if (now - lastQuery < 1500) {
-            console.log(`[防刷 - ${this.name}] 攔截來自 [${chatName}] (${chatId}) 的頻繁查詢`);
-            sendTelegramMessage(
-                this.token,
-                chatId,
-                `⚠️ <b>您的查詢頻率過快</b>\n\n系統正在為其他同仁服務，請稍候 1.5 秒後再試。`,
-                myKeyboard
-            );
-            return;
-        }
-        userLastQueryTime[chatId] = now;
 
         // 處理商品查詢
         const hasQuery = this.features.includes('query');
@@ -1523,7 +1719,11 @@ function updateGlobalBotChats(token, authorizedChats) {
                     bot.authorizedChats = authorizedChats;
                     
                     fs.unwatchFile(CONFIG_PATH);
-                    fs.writeFileSync(CONFIG_PATH, JSON.stringify(parsed, null, 2), 'utf8');
+                    // 🛡️ 採用原子寫入 (Write-then-Rename)，防範寫入中途異常斷電導致設定檔損毀
+                    const tempPath = CONFIG_PATH + '.tmp';
+                    fs.writeFileSync(tempPath, JSON.stringify(parsed, null, 2), 'utf8');
+                    fs.renameSync(tempPath, CONFIG_PATH);
+                    
                     console.log(`[系統] 成功將新 Chat ID 寫入 config.json [${bot.name}]`);
                     
                     config.bots = parsed.bots;
