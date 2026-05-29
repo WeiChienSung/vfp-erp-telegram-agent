@@ -3,3 +3,7 @@ stock_snapshot.json
 active_url.txt
 *.log
 backorder_state.json
+ai_assistant/bridge_chats.json
+ai_assistant/bridge_state.json
+ai_assistant/telegram_inbox.txt
+ai_assistant/telegram_outbox.txt
