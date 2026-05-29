@@ -1,5 +1,5 @@
-# 1. Force kill node processes on port 28256 (Bot) and port 3000 (Config Server)
-$ports = @(28256, 3000)
+# 1. Force kill node processes on port 3000 and 28256
+$ports = @(3000, 28256)
 foreach ($port in $ports) {
     $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
     foreach ($conn in $connections) {
@@ -10,17 +10,16 @@ foreach ($port in $ports) {
     }
 }
 
-# 2. Kill any running telegram_bridge.js processes
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*telegram_bridge.js*" } | ForEach-Object {
+# 2. Clean up leftover localtunnel and bridge processes
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*localtunnel*" -or $_.CommandLine -like "*telegram_bridge.js*" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Output "Stopped telegram_bridge.js process $($_.ProcessId)"
 }
 
 Start-Sleep -Seconds 2
 
 # 3. Start Node services via cscript.exe wrappers to avoid Session 0 GUI restriction
-Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_query.vbs" -WindowStyle Hidden
 Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_take.vbs" -WindowStyle Hidden
+Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_query.vbs" -WindowStyle Hidden
 Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_bridge.vbs" -WindowStyle Hidden
 
-Write-Output "Services restarted successfully (Query Bot, Local Config Server & AI Bridge)."
+Write-Output "Services restarted successfully."
