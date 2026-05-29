@@ -124,6 +124,40 @@ function sendTelegramPhoto(chatId, photoPath, caption) {
     req.end();
 }
 
+// 檔案下載輔助函數 (用於下載 Telegram 圖片/文件)
+function downloadTelegramFile(fileId, localPath, callback) {
+    const getUrl = `https://api.telegram.org/bot${TOKEN}/getFile?file_id=${fileId}`;
+    https.get(getUrl, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+            try {
+                const data = JSON.parse(body);
+                if (data.ok && data.result && data.result.file_path) {
+                    const filePath = data.result.file_path;
+                    const downloadUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
+                    const fileStream = fs.createWriteStream(localPath);
+                    https.get(downloadUrl, (downloadRes) => {
+                        downloadRes.pipe(fileStream);
+                        fileStream.on('finish', () => {
+                            fileStream.close();
+                            callback(null, localPath);
+                        });
+                    }).on('error', (err) => {
+                        callback(err);
+                    });
+                } else {
+                    callback(new Error('Failed to get file path from Telegram API'));
+                }
+            } catch (e) {
+                callback(e);
+            }
+        });
+    }).on('error', (err) => {
+        callback(err);
+    });
+}
+
 // 獲取 updates
 function getUpdates() {
     const url = `https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=30`;
@@ -138,16 +172,20 @@ function getUpdates() {
                         lastUpdateId = update.update_id;
                         saveState();
                         const msg = update.message;
-                        if (msg && msg.text) {
-                            const chatId = msg.chat.id;
-                            chatIds.add(chatId);
-                            saveChatIds();
+                        if (!msg) return;
+
+                        const chatId = msg.chat.id;
+                        chatIds.add(chatId);
+                        saveChatIds();
+
+                        const timestamp = new Date().toISOString();
  
-                            const timestamp = new Date().toISOString();
+                        // 1. 處理文字訊息
+                        if (msg.text) {
                             const line = `[${timestamp}] [Chat:${chatId}] User: ${msg.text}\n`;
                             const cmd = msg.text.trim().toLowerCase();
  
-                            // 1. 原生指令處理：截圖 (0 阻礙、0 彈窗)
+                            // 1.1 原生指令處理：截圖 (0 阻礙、0 彈窗)
                             if (cmd === '截圖' || cmd === 'screenshot' || cmd.includes('chrome') || cmd.includes('畫面') || cmd.includes('螢幕')) {
                                 sendTelegramMessage(chatId, `📸 <b>收到截圖要求！</b>\n正在擷取您本機的桌面與 Chrome 視窗，請稍候約 3 秒...`);
                                 
@@ -180,7 +218,7 @@ function getUpdates() {
                                 return;
                             }
  
-                            // 2. 原生指令處理：讀取日誌
+                            // 1.2 原生指令處理：讀取日誌
                             if (cmd === '日誌' || cmd === 'logs' || cmd.includes('log') || cmd.includes('日誌')) {
                                 sendTelegramMessage(chatId, `📝 <b>正在讀取 take_server.js 的最新日誌...</b>`);
                                 const logPath = 'C:\\agy_Add_on\\take_server.log';
@@ -198,7 +236,7 @@ function getUpdates() {
                                 return;
                             }
  
-                            // 3. 原生指令處理：重啟服務 (直接在背景調用，不引發 YES/NO 彈窗)
+                            // 1.3 原生指令處理：重啟服務 (直接在背景調用，不引發 YES/NO 彈窗)
                             if (cmd === '重啟' || cmd === 'restart' || cmd === '重啟服務') {
                                 sendTelegramMessage(chatId, `🔄 <b>正在重啟 ERP 盤點與 Bot 服務...</b>\n這將在本機背景殺死進程並重新連線，大約需要 15 秒...`);
                                 
@@ -228,23 +266,49 @@ function getUpdates() {
                                 });
                                 return;
                             }
-
-                            // 3.5 原生指令處理：關機與取消關機 (遠端遙控 Windows 關機)
+ 
+                            // 1.4 原生指令處理：關機與取消關機 (遠端遙控 Windows 關機)
                             if (cmd === '關機' || cmd === 'shutdown' || cmd.includes('關電腦') || cmd.includes('關機')) {
                                 sendTelegramMessage(chatId, `🖥️ <b>收到關機要求！</b>\n系統已啟動 Windows 關機排程（將於 30 秒後關閉本機電腦）。\n\n若需取消關機，請立刻在 Telegram 輸入：\n<code>取消關機</code> 或 <code>abort</code>`);
                                 spawn('shutdown.exe', ['/s', '/t', '30', '/c', 'Telegram Bridge Requested Shutdown']);
                                 return;
                             }
-
+ 
                             if (cmd === '取消關機' || cmd === 'abort' || cmd.includes('取消關機')) {
                                 sendTelegramMessage(chatId, `✅ <b>已成功取消 Windows 關機排程！</b>`);
                                 spawn('shutdown.exe', ['/a']);
                                 return;
                             }
  
-                            // 4. 其他一般指令，寫入 Inbox 提交給 AI
+                            // 1.5 其他一般文字，寫入 Inbox
                             fs.appendFileSync(INBOX_PATH, line, 'utf8');
                             console.log(`[Bridge Inbox] ${line.trim()}`);
+                        }
+                        // 2. 處理圖片訊息 (Photo)
+                        else if (msg.photo && msg.photo.length > 0) {
+                            const photo = msg.photo[msg.photo.length - 1]; // 獲取最大尺寸的圖片
+                            const fileId = photo.file_id;
+                            const downloadsDir = path.join(__dirname, 'downloads');
+                            if (!fs.existsSync(downloadsDir)) {
+                                fs.mkdirSync(downloadsDir, { recursive: true });
+                            }
+                            const filename = `photo_${Date.now()}.jpg`;
+                            const localPath = path.join(downloadsDir, filename);
+
+                            sendTelegramMessage(chatId, `📥 <b>收到圖片！</b>\n正在為您下載並提交給 AI 分析，請稍候約 5 秒...`);
+
+                            downloadTelegramFile(fileId, localPath, (err, savedPath) => {
+                                if (err) {
+                                    console.error('[Bridge] Download photo error:', err.message);
+                                    sendTelegramMessage(chatId, `⚠️ 圖片下載失敗: ${err.message}`);
+                                    return;
+                                }
+                                const captionText = msg.caption ? ` (附註說明: ${msg.caption})` : '';
+                                const line = `[${timestamp}] [Chat:${chatId}] User sent photo: ${savedPath}${captionText}\n`;
+                                fs.appendFileSync(INBOX_PATH, line, 'utf8');
+                                console.log(`[Bridge Inbox] ${line.trim()}`);
+                                sendTelegramMessage(chatId, `✅ <b>圖片下載成功！</b>\n已將圖片提交給 AI。您現在可以在網頁對話框中與我討論這張圖片了！`);
+                            });
                         }
                     });
                 }
