@@ -1,0 +1,668 @@
+/*
+========================================================================
+   【優化與修正後 Google 試算表欠貨與手動輸入腳本】
+========================================================================
+使用說明：
+1. 本指令碼相容 12 欄新格式與 13 欄舊格式。
+2. 點選試算表上方選單的 **「後送管理」➔「🛠️ 升級目前工作表格式 (13欄轉12欄)」** 即可安全升級目前工作表。
+3. 點選 **「後送管理」➔「🔄 從舊試算表遷移資料 (一次性)」**，可將其他舊試算表資料安全轉換並匯入。
+========================================================================
+*/
+
+// === 1. Webhook 查詢端（供 Telegram Bot 查詢未出貨清單） ===
+function doGet(e) {
+  try {
+    let ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheetName = (e && e.parameter && e.parameter.sheet) ? e.parameter.sheet : "待補貨清單";
+    let activeSheet = ss.getSheetByName(sheetName);
+    if (!activeSheet) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "找不到分頁：" + sheetName }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    let data = activeSheet.getDataRange().getValues();
+    
+    // 如果傳入 raw=true，則直接回傳原始 2D 陣列 (包含標題列與所有欄位)
+    if (e && e.parameter && e.parameter.raw === "true") {
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", data: data }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    let colMap = getColumnMapping(activeSheet);
+    let list = [];
+    // 略過首行標題欄
+    for (let i = 1; i < data.length; i++) {
+      let row = data[i];
+      let custName = row[colMap.customerName];
+      let prodName = row[colMap.productName];
+      if (!custName && !prodName) continue; // 略過空白列
+      
+      let timeVal = row[colMap.time];
+      if (timeVal instanceof Date) {
+        timeVal = formatDateOnly(timeVal);
+      }
+      
+      list.push({
+        time: timeVal,
+        customerName: custName,
+        productName: prodName,
+        paidQty: row[colMap.paidQty],
+        shippedQty: 0, // 出貨數量已移除，預設為 0
+        freeQty: row[colMap.freeQty],
+        stockStatus: row[colMap.stockStatus],
+        manualRemark: row[colMap.manualRemark],
+        customerNo: row[colMap.customerNo],
+        productNo: row[colMap.productNo],
+        invoiceNo: row[colMap.invoiceNo] || ""
+      });
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ status: "success", data: list }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.message, stack: err.stack }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// === 2. Webhook 接收端（接收本機 ERP 同步請求） ===
+function doPost(e) {
+  try {
+    if (!e || !e.postData) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "無傳輸資料" }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    let payload = JSON.parse(e.postData.contents);
+    
+    if (payload.action === "sync_backorders") {
+      syncBackorders(payload.data);
+      return ContentService.createTextOutput(JSON.stringify({ status: "success" }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "未知的 action" }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.message, stack: err.stack }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// === 3. 核心同步邏輯（保留手動輸入列，保留備註，參考備份區） ===
+function syncBackorders(backorders) {
+  if (!Array.isArray(backorders)) return;
+
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let activeSheet = ss.getSheetByName("待補貨清單");
+  let backupSheet = ss.getSheetByName("待補貨清單備份區");
+  
+  if (!activeSheet || !backupSheet) {
+    throw new Error("找不到『待補貨清單』或『待補貨清單備份區』分頁，請確認分頁名稱是否正確。");
+  }
+  
+  // 取得與目前工作表綁定的 Lock，避免併發寫入衝突，最長等待 30 秒
+  let lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    throw new Error("系統繁忙中 (無法取得 Google 試算表鎖定)，請稍後再試。");
+  }
+  
+  try {
+    // 1. 同步前先自動檢測並過渡至新版 12 欄
+    let migratedActive = checkAndMigrateLayout(activeSheet);
+    let migratedBackup = checkAndMigrateLayout(backupSheet);
+    if (migratedActive || migratedBackup) {
+      SpreadsheetApp.flush(); // 強制刷新快取，保證後續讀取格式完全對齊
+    }
+    
+    const headers = [
+      "時間", "藥局", "產品", "欠貨數量 (付費品)", "搭贈數量 (免費品)", 
+      "確認完全出貨請勾選 (結案搬移)", "完成時間", 
+      "當前庫存", "內勤手動備註", "客戶代號 (可隱藏)", "產品品號 (可隱藏)", "出貨單號 (可隱藏)"
+    ];
+    
+    activeSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    activeSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#f3f3f3");
+    activeSheet.setFrozenRows(1);
+
+    backupSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    backupSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#e6ebd5");
+    backupSheet.setFrozenRows(1);
+    
+    // A. 讀取目前的未出貨清單，建立手動備註快取，並保留手動 Key-in 列
+    let activeRange = activeSheet.getDataRange();
+    let activeData = activeRange.getValues();
+    let activeMap = {}; // Key: 客戶代號_品號_出貨單號 (或 客戶代號_品號) -> { time, manualRemark }
+    let manualRows = []; // 儲存手動輸入列
+    
+    for (let i = 1; i < activeData.length; i++) {
+      let row = activeData[i];
+      
+      // 將資料列強制規格化為 12 欄以防止後續維度不匹配報錯
+      let normalizedRow = [...row];
+      while (normalizedRow.length < 12) normalizedRow.push("");
+      if (normalizedRow.length > 12) normalizedRow.length = 12;
+      
+      let custCode = normalizedRow[9] ? normalizedRow[9].toString().trim() : "";
+      let prodCode = normalizedRow[10] ? normalizedRow[10].toString().trim() : "";
+      let invoiceNo = normalizedRow[11] ? normalizedRow[11].toString().trim() : "";
+      
+      // 判斷是否為手動輸入列：客戶代號或產品品號任一為空
+      if (!custCode || !prodCode) {
+        if (normalizedRow[0] || normalizedRow[1] || normalizedRow[2] || normalizedRow[3]) {
+          manualRows.push(normalizedRow);
+        }
+        continue;
+      }
+      
+      // 建立複合 Key，解決同客戶同商品不同單號的衝突
+      let key = custCode + "_" + prodCode;
+      if (invoiceNo) {
+        key += "_" + invoiceNo;
+      }
+      
+      activeMap[key] = {
+        time: normalizedRow[0],
+        manualRemark: normalizedRow[8]
+      };
+    }
+    
+    // B. 讀取備份區，建立「已出貨」快取（雙鍵匹配防止同步覆寫）
+    let backupData = backupSheet.getDataRange().getValues();
+    let backupMap = {}; // Key -> 最新完成時間 (Date)
+    
+    for (let i = 1; i < backupData.length; i++) {
+      let row = backupData[i];
+      let custCode = row[9] ? row[9].toString().trim() : "";
+      let prodCode = row[10] ? row[10].toString().trim() : "";
+      let invoiceNo = row[11] ? row[11].toString().trim() : "";
+      let compTimeStr = row[6]; // G欄: 完成時間
+      let originalDateVal = row[0]; // A欄: 原本建立時間 (用以作為無單號時的備用比對)
+      
+      if (custCode && prodCode) {
+        let compTime = new Date(compTimeStr);
+        if (isNaN(compTime.getTime())) {
+          compTime = new Date('9999-12-31');
+        }
+        
+        // 1. 精準鍵：客戶_商品_出貨單號
+        if (invoiceNo) {
+          let keyWithInvoice = custCode + "_" + prodCode + "_" + invoiceNo;
+          if (!backupMap[keyWithInvoice] || compTime > backupMap[keyWithInvoice]) {
+            backupMap[keyWithInvoice] = compTime;
+          }
+        }
+        
+        // 2. 備用鍵：客戶_商品_原始日期 (防止手動封存無單號時重複匯入)
+        let originalDateStr = "";
+        if (originalDateVal instanceof Date) {
+          originalDateStr = formatDateOnly(originalDateVal);
+        } else if (originalDateVal) {
+          originalDateStr = originalDateVal.toString().trim();
+        }
+        
+        if (originalDateStr) {
+          let keyWithDate = custCode + "_" + prodCode + "_" + originalDateStr;
+          if (!backupMap[keyWithDate] || compTime > backupMap[keyWithDate]) {
+            backupMap[keyWithDate] = compTime;
+          }
+        }
+      }
+    }
+    
+    // C. 開始處理同步數據
+    let newRows = [];
+    backorders.forEach(bo => {
+      let invoiceNo = bo.invoiceNo ? bo.invoiceNo.toString().trim() : "";
+      let custNo = bo.customerNo.toString().trim();
+      let prodNo = bo.productNo.toString().trim();
+      
+      let erpDate = parseERPDate(bo.date);
+      let erpDateStr = formatDateOnly(erpDate);
+      
+      let keyWithInvoice = custNo + "_" + prodNo + "_" + invoiceNo;
+      let keyWithDate = custNo + "_" + prodNo + "_" + erpDateStr;
+      
+      // 雙重安全匹配，防止歷史手動已封存紀錄被重複拉回
+      let isArchived = false;
+      if (invoiceNo && backupMap[keyWithInvoice] && backupMap[keyWithInvoice] >= erpDate) {
+        isArchived = true;
+      } else if (backupMap[keyWithDate] && backupMap[keyWithDate] >= erpDate) {
+        isArchived = true;
+      }
+      
+      if (isArchived) {
+        return; // 跳過已封存資料
+      }
+      
+      let timeStr = erpDateStr;
+      let manualRemark = "";
+      
+      // 優先用帶單號的 Key 比對以還原手動備註及首次時間
+      let activeKey = custNo + "_" + prodNo;
+      if (invoiceNo) {
+        activeKey += "_" + invoiceNo;
+      }
+      
+      let matchedEntry = activeMap[activeKey];
+      if (!matchedEntry && invoiceNo) {
+        // 降級回退：如果帶有單號的 Key 沒匹配到，嘗試匹配不帶單號的 Key (相容舊手動輸入)
+        let fallbackKey = custNo + "_" + prodNo;
+        if (activeMap[fallbackKey]) {
+          matchedEntry = activeMap[fallbackKey];
+        }
+      }
+      
+      if (matchedEntry) {
+        if (matchedEntry.time) {
+          timeStr = matchedEntry.time;
+          if (timeStr instanceof Date) {
+            timeStr = formatDateOnly(timeStr);
+          }
+        }
+        manualRemark = matchedEntry.manualRemark;
+      }
+      
+      newRows.push([
+        timeStr,         // A欄: 時間
+        bo.customerName, // B欄: 藥局
+        bo.productName,  // C欄: 產品
+        bo.paidQty,      // D欄: 欠貨數量 (付費品)
+        bo.freeQty,      // E欄: 搭贈數量 (免費品)
+        false,           // F欄: 確認完全出貨請勾選 (Checkbox)
+        "",              // G欄: 完成時間
+        bo.stockStatus,  // H欄: 當前庫存
+        manualRemark,    // I欄: 內勤手動備註
+        bo.customerNo,   // J欄: 客戶代號
+        bo.productNo,    // K欄: 產品品號
+        invoiceNo        // L欄: 出貨單號
+      ]);
+    });
+    
+    // 合併手動列
+    manualRows.forEach(row => {
+      newRows.push(row);
+    });
+    
+    let lastRow = activeSheet.getLastRow();
+    let maxCols = activeSheet.getMaxColumns();
+    
+    // D. 覆蓋寫入，避免髒讀時間差
+    if (newRows.length > 0) {
+      activeSheet.getRange(2, 1, newRows.length, 12).setValues(newRows);
+      activeSheet.getRange(2, 6, newRows.length, 1).insertCheckboxes();
+    }
+    
+    // 清除下方溢出多餘的舊列，而非直接全表清空
+    let startRowToClear = newRows.length + 2;
+    if (lastRow >= startRowToClear) {
+      let numRowsToClear = lastRow - startRowToClear + 1;
+      activeSheet.getRange(startRowToClear, 1, numRowsToClear, Math.max(maxCols, 12)).clearContent();
+      activeSheet.getRange(startRowToClear, 6, numRowsToClear, 1).removeCheckboxes();
+    }
+    
+    // 裁剪多餘欄位，保持標準 12 欄
+    if (activeSheet.getMaxColumns() > headers.length) {
+      activeSheet.deleteColumns(headers.length + 1, activeSheet.getMaxColumns() - headers.length);
+    }
+    if (backupSheet.getMaxColumns() > headers.length) {
+      backupSheet.deleteColumns(headers.length + 1, backupSheet.getMaxColumns() - headers.length);
+    }
+  } finally {
+    lock.releaseLock(); // 釋放鎖定
+  }
+}
+
+// === 4. 自訂選單與批次結案搬移 ===
+function archiveCheckedRows() {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let activeSheet = ss.getSheetByName("待補貨清單");
+  let backupSheet = ss.getSheetByName("待補貨清單備份區");
+  
+  if (!activeSheet || !backupSheet) {
+    SpreadsheetApp.getUi().alert("錯誤：找不到『待補貨清單』或『待補貨清單備份區』分頁。");
+    return;
+  }
+  
+  if (isOldLayout(activeSheet)) {
+    SpreadsheetApp.getUi().alert("您的工作表仍為舊版 13 欄格式，請先點選 [後送管理] -> [升級目前工作表格式] 進行升級後，再執行此操作。");
+    return;
+  }
+  
+  let lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(20000); // 20 秒等待
+  } catch (err) {
+    SpreadsheetApp.getUi().alert("系統繁忙中，無法取得試算表鎖定，請稍後再試。");
+    return;
+  }
+  
+  try {
+    let movedCount = performArchiving(activeSheet, backupSheet);
+    if (movedCount > 0) {
+      SpreadsheetApp.getUi().alert("成功！已將 " + movedCount + " 筆項目移至備份區。");
+    } else {
+      SpreadsheetApp.getUi().alert("提示：目前沒有勾選任何項目。");
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// === 5. 一次性舊資料遷移模組 ===
+function migrateOldData() {
+  let ui = SpreadsheetApp.getUi();
+  let response = ui.prompt(
+    "🔄 從舊試算表遷移資料",
+    "請輸入舊試算表的 ID (或是整段 URL 網址)：",
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  
+  let input = response.getResponseText().trim();
+  if (!input) {
+    ui.alert("請輸入有效的 ID 或網址。");
+    return;
+  }
+  
+  let oldSheetId = input;
+  if (input.includes("spreadsheets/d/")) {
+    let match = input.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    if (match) {
+      oldSheetId = match[1];
+    }
+  }
+  
+  try {
+    let oldSs = SpreadsheetApp.openById(oldSheetId);
+    let newSs = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // 1. 遷移 待補貨清單
+    let oldActive = oldSs.getSheetByName("待補貨清單");
+    let newActive = newSs.getSheetByName("待補貨清單");
+    let activeMigratedCount = 0;
+    
+    if (oldActive && newActive) {
+      let lastRow = oldActive.getLastRow();
+      let lastCol = oldActive.getLastColumn();
+      if (lastRow > 1) {
+        let oldHeaders = oldActive.getRange(1, 1, 1, lastCol).getValues()[0];
+        let hasShippedQtyCol = oldHeaders.length >= 5 && oldHeaders[4].toString().includes("出貨數量");
+        
+        let data = oldActive.getRange(2, 1, lastRow - 1, lastCol).getValues();
+        let newRows = data.map(row => {
+          let r = [...row];
+          while (r.length < oldHeaders.length) {
+            r.push("");
+          }
+          if (hasShippedQtyCol) {
+            r.splice(4, 1); // 移除舊版第五欄 (E 欄，出貨數量)
+          }
+          while (r.length < 12) r.push(""); // 補齊至 12 欄
+          if (r.length > 12) r.length = 12; // 裁切至 12 欄
+          return r;
+        });
+        
+        // 清除新試算表原有舊資料，防止覆寫後殘留舊列
+        let newLastRow = newActive.getLastRow();
+        let newMaxCols = newActive.getMaxColumns();
+        if (newLastRow > 1) {
+          newActive.getRange(2, 1, newLastRow - 1, newMaxCols).clearContent();
+        }
+        let newMaxRows = newActive.getMaxRows();
+        if (newMaxRows > 1) {
+          newActive.getRange(2, 6, newMaxRows - 1, 1).removeCheckboxes();
+        }
+        
+        // 寫入新試算表並建立 Checkbox
+        newActive.getRange(2, 1, newRows.length, 12).setValues(newRows);
+        newActive.getRange(2, 6, newRows.length, 1).insertCheckboxes();
+        activeMigratedCount = newRows.length;
+      }
+    }
+    
+    // 2. 遷移 待補貨清單備份區
+    let oldBackup = oldSs.getSheetByName("待補貨清單備份區");
+    let newBackup = newSs.getSheetByName("待補貨清單備份區");
+    let backupMigratedCount = 0;
+    
+    if (oldBackup && newBackup) {
+      let lastRow = oldBackup.getLastRow();
+      let lastCol = oldBackup.getLastColumn();
+      if (lastRow > 1) {
+        let oldHeaders = oldBackup.getRange(1, 1, 1, lastCol).getValues()[0];
+        let hasShippedQtyCol = oldHeaders.length >= 5 && oldHeaders[4].toString().includes("出貨數量");
+        
+        let data = oldBackup.getRange(2, 1, lastRow - 1, lastCol).getValues();
+        let newRows = data.map(row => {
+          let r = [...row];
+          while (r.length < oldHeaders.length) {
+            r.push("");
+          }
+          if (hasShippedQtyCol) {
+            r.splice(4, 1);
+          }
+          while (r.length < 12) r.push("");
+          if (r.length > 12) r.length = 12;
+          return r;
+        });
+        
+        // 附加寫入新備份區
+        let lastRowNew = newBackup.getLastRow();
+        newBackup.getRange(lastRowNew + 1, 1, newRows.length, 12).setValues(newRows);
+        newBackup.getRange(lastRowNew + 1, 6, newRows.length, 1).insertCheckboxes();
+        backupMigratedCount = newRows.length;
+      }
+    }
+    
+    ui.alert("🎉 舊試算表資料遷移成功！\n\n• 待補貨清單: 成功轉移 " + activeMigratedCount + " 筆\n• 備份區: 成功轉移 " + backupMigratedCount + " 筆\n\n您現在可以開始使用新版功能。");
+  } catch (err) {
+    ui.alert("❌ 遷移失敗，原因: " + err.message + "\n\n請確認舊的試算表並未被刪除，且您擁有其存取權限。");
+  }
+}
+
+// === 6. 時間解析輔助工具 ===
+function parseERPDate(dateStr) {
+  if (!dateStr) return new Date();
+  let str = dateStr.toString().replace(/[-/]/g, "").trim(); // 去除減號與斜線
+  if (str.length === 8) {
+    let y = parseInt(str.substring(0, 4), 10);
+    let m = parseInt(str.substring(4, 6), 10) - 1;
+    let d = parseInt(str.substring(6, 8), 10);
+    if (!isNaN(y) && !isNaN(m) && !isNaN(d)) {
+      return new Date(y, m, d);
+    }
+  }
+  let parsed = new Date(dateStr);
+  return isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function formatDateOnly(date) {
+  return Utilities.formatDate(date, "GMT+8", "yyyy/MM/dd");
+}
+
+// === 7. 試算表手動打勾聯動事件 (自動移至備份區，解決並發座標位移 Bug) ===
+function onEdit(e) {
+  let range = e.range;
+  let sheet = range.getSheet();
+  
+  if (sheet.getName() !== "待補貨清單" || range.getRow() <= 1) return;
+  
+  let startCol = range.getColumn();
+  let endCol = range.getLastColumn();
+  if (startCol > 6 || endCol < 6) return; // 編輯範圍不包含 F 欄（Checkbox 欄）則忽略
+  
+  if (isOldLayout(sheet)) return; // 舊格式時靜默退出，防止使用者誤觸或導致刪除錯位
+  
+  let backupSheet = sheet.getParent().getSheetByName("待補貨清單備份區");
+  if (!backupSheet) return;
+  
+  let lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(15000); // 15 秒等待
+  } catch (err) {
+    return; // 靜默退出
+  }
+  
+  try {
+    performArchiving(sheet, backupSheet);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// === 8. 自動檢測與格式相容遷移工具 ===
+function checkAndMigrateLayout(sheet) {
+  if (!sheet) return false;
+  let lastCol = sheet.getLastColumn();
+  if (lastCol >= 13) {
+    let headerE = sheet.getRange(1, 5).getValue().toString().trim();
+    if (headerE.includes("出貨數量")) {
+      sheet.deleteColumn(5); // 刪除第五欄，後續欄位左移
+      return true;
+    }
+  }
+  return false;
+}
+
+function isOldLayout(sheet) {
+  if (!sheet) return false;
+  let lastCol = sheet.getLastColumn();
+  if (lastCol >= 13) {
+    let headerE = sheet.getRange(1, 5).getValue();
+    if (headerE && headerE.toString().trim().includes("出貨數量")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getColumnMapping(sheet) {
+  let lastCol = sheet.getLastColumn();
+  let headers = sheet.getRange(1, 1, 1, Math.max(1, lastCol)).getValues()[0];
+  let map = {
+    time: 0,
+    customerName: 1,
+    productName: 2,
+    paidQty: 3,
+    freeQty: 4,
+    checkbox: 5,
+    completeTime: 6,
+    stockStatus: 7,
+    manualRemark: 8,
+    customerNo: 9,
+    productNo: 10,
+    invoiceNo: 11
+  };
+  
+  let shippedQtyIndex = headers.findIndex(h => h && h.toString().includes("出貨數量"));
+  if (shippedQtyIndex !== -1) {
+    // 舊版 13 欄對照表
+    map.freeQty = 5;
+    map.checkbox = 6;
+    map.completeTime = 7;
+    map.stockStatus = 8;
+    map.manualRemark = 9;
+    map.customerNo = 10;
+    map.productNo = 11;
+    map.invoiceNo = 12;
+  }
+  return map;
+}
+
+// 核心封存邏輯 (整表掃描，避免單列刪除引發之併發競態 Bug)
+function performArchiving(activeSheet, backupSheet) {
+  let dataRange = activeSheet.getDataRange();
+  let data = dataRange.getValues();
+  
+  let rowsToMove = [];
+  let rowsToDelete = [];
+  
+  let now = new Date();
+  let timeStr = Utilities.formatDate(now, "GMT+8", "yyyy/MM/dd HH:mm");
+  
+  for (let i = 1; i < data.length; i++) {
+    let row = data[i];
+    let checkVal = row[5]; // F 欄為 Checkbox
+    if (checkVal === true || (checkVal && String(checkVal).toUpperCase() === 'TRUE')) {
+      let rowValues = [...row];
+      while (rowValues.length < 12) {
+        rowValues.push("");
+      }
+      if (rowValues.length > 12) {
+        rowValues.length = 12;
+      }
+      rowValues[5] = true;
+      rowValues[6] = timeStr; // 寫入完成時間 (G 欄)
+      rowsToMove.push(rowValues);
+      rowsToDelete.push(i + 1);
+    }
+  }
+  
+  if (rowsToMove.length === 0) {
+    return 0;
+  }
+  
+  // 1. 寫入備份區並建立 Checkbox
+  let lastRow = backupSheet.getLastRow();
+  backupSheet.getRange(lastRow + 1, 1, rowsToMove.length, 12).setValues(rowsToMove);
+  backupSheet.getRange(lastRow + 1, 6, rowsToMove.length, 1).insertCheckboxes();
+  
+  // 2. 逆向刪除已勾選列
+  for (let i = rowsToDelete.length - 1; i >= 0; i--) {
+    activeSheet.deleteRow(rowsToDelete[i]);
+  }
+  
+  return rowsToMove.length;
+}
+
+// 供管理員手動進行在線升級格式
+function upgradeCurrentSheetFormat() {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let activeSheet = ss.getSheetByName("待補貨清單");
+  let backupSheet = ss.getSheetByName("待補貨清單備份區");
+  
+  if (!activeSheet || !backupSheet) {
+    SpreadsheetApp.getUi().alert("錯誤：找不到『待補貨清單』或『待補貨清單備份區』分頁。");
+    return;
+  }
+  
+  let lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    SpreadsheetApp.getUi().alert("系統繁忙中，無法取得鎖定，請稍後再試。");
+    return;
+  }
+  
+  try {
+    let migratedActive = checkAndMigrateLayout(activeSheet);
+    let migratedBackup = checkAndMigrateLayout(backupSheet);
+    
+    if (migratedActive || migratedBackup) {
+      SpreadsheetApp.flush(); // 強制應用結構變更並重設快取
+      SpreadsheetApp.getUi().alert("🎉 升級成功！已將工作表從 13 欄格式升級為 12 欄格式。");
+    } else {
+      SpreadsheetApp.getUi().alert("提示：您的工作表已經是新版 12 欄格式，無需升級。");
+    }
+  } catch (err) {
+    SpreadsheetApp.getUi().alert("升級失敗：" + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// === 9. 顯示自訂選單 ===
+function onOpen() {
+  let ui = SpreadsheetApp.getUi();
+  ui.createMenu("後送管理")
+    .addItem("🧹 批次出貨結案 (搬移已勾選列)", "archiveCheckedRows")
+    .addItem("🛠️ 升級目前工作表格式 (13欄轉12欄)", "upgradeCurrentSheetFormat")
+    .addItem("🔄 從舊試算表遷移資料 (一次性)", "migrateOldData")
+    .addToUi();
+}

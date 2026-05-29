@@ -11,19 +11,18 @@ foreach ($port in $ports) {
 }
 
 # 2. 暫時將開機自啟 VBS 移出啟動資料夾，避免重啟被發現
-$startupPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\ERP_隨身查.vbs"
-$backupPath = "C:\agy_Add_on\ERP_隨身查.vbs.bak"
+# 使用 Unicode 字元轉義以防止編碼問題導致 Path 為 Null
+$vbsName = "ERP_" + [char]0x96a8 + [char]0x8eab + [char]0x67e5 + ".vbs"
+$startupPath = Join-Path "C:\Users\5Vce8\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup" $vbsName
+$backupPath = "C:\agy_Add_on\ERP_startup.vbs.bak"
 if (Test-Path $startupPath) {
     Move-Item -Path $startupPath -Destination $backupPath -Force
     Write-Output "Moved Startup script to backup location."
+} else {
+    Write-Output "Startup script not found at $startupPath (possibly already hidden or path mismatch)."
 }
 
-# 3. 暫時將桌面上的 Git 專案資料夾移入 C:\agy_Add_on，不在桌面留痕跡
-$desktopRepo = "C:\Users\5Vce8\Desktop\vfp-erp-telegram-agent"
-$hiddenRepo = "C:\agy_Add_on\vfp-erp-telegram-agent.bak"
-if (Test-Path $desktopRepo) {
-    Move-Item -Path $desktopRepo -Destination $hiddenRepo -Force
-    Write-Output "Moved Desktop repo folder to backup location."
-}
+# 3. 桌面 Git 專案資料夾已永久移入 C:\agy_Add_on，無須再進行移動隱藏
+Write-Output "Desktop repo folder is permanently stored in hidden directory."
 
 Write-Output "Safe Hide Mode activated. All running services stopped and desktop/startup files hidden."

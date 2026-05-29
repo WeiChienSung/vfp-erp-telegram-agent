@@ -43,7 +43,7 @@
   "bots": [
     {
       "name": "BOT_1",
-      "token": "8235163535:AAF85YFKevBzcmw7pOsd4P7pDrrEo8U29gQ",
+      "token": "<TELEGRAM_BOT_TOKEN_REMOVED>",
       "features": [
         "query",
         "history",

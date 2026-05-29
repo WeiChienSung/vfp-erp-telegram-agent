@@ -1,24 +1,24 @@
 # 1. 還原開機自啟 VBS 到啟動資料夾
-$startupPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\ERP_隨身查.vbs"
-$backupPath = "C:\agy_Add_on\ERP_隨身查.vbs.bak"
+$vbsName = "ERP_" + [char]0x96a8 + [char]0x8eab + [char]0x67e5 + ".vbs"
+$startupPath = Join-Path "C:\Users\5Vce8\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup" $vbsName
+$backupPath = "C:\agy_Add_on\ERP_startup.vbs.bak"
 if (Test-Path $backupPath) {
     Move-Item -Path $backupPath -Destination $startupPath -Force
     Write-Output "Restored Startup script."
+} else {
+    Write-Output "Backup Startup script not found."
 }
 
-# 2. 還原桌面上的 Git 專案資料夾
-$desktopRepo = "C:\Users\5Vce8\Desktop\vfp-erp-telegram-agent"
-$hiddenRepo = "C:\agy_Add_on\vfp-erp-telegram-agent.bak"
-if (Test-Path $hiddenRepo) {
-    Move-Item -Path $hiddenRepo -Destination $desktopRepo -Force
-    Write-Output "Restored Desktop repo folder."
-}
+# 2. 桌面 Git 專案資料夾已永久移入 C:\agy_Add_on，無須再還原至桌面
+Write-Output "Desktop repo folder is permanently stored in hidden directory."
 
 # 3. 執行 VBS 自啟動服務
 if (Test-Path $startupPath) {
-    Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_query.vbs" -WindowStyle Hidden
-    Start-Process "cscript.exe" -ArgumentList "C:\agy_Add_on\run_take.vbs" -WindowStyle Hidden
+    $arg = '"`"{0}`"' -f $startupPath
+    Start-Process "wscript.exe" -ArgumentList $arg -WindowStyle Hidden
     Write-Output "Services restarted."
+} else {
+    Write-Output "Failed to restart services because Startup VBS is missing."
 }
 
 Write-Output "Restore completed. Services are running normally."

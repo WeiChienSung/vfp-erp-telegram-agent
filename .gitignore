@@ -2,3 +2,4 @@ config.json
 stock_snapshot.json
 active_url.txt
 *.log
+backorder_state.json
