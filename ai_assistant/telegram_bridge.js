@@ -232,7 +232,6 @@ function getUpdates() {
                             // 4. 其他一般指令，寫入 Inbox 提交給 AI
                             fs.appendFileSync(INBOX_PATH, line, 'utf8');
                             console.log(`[Bridge Inbox] ${line.trim()}`);
-                            sendTelegramMessage(chatId, `📥 <b>已收到指令！</b>\n已將指令提交給 Antigravity (AI 助理)，將在 60 秒內為您處理，請稍候...`);
                         }
                     });
                 }
