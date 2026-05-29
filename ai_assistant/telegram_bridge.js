@@ -228,6 +228,19 @@ function getUpdates() {
                                 });
                                 return;
                             }
+
+                            // 3.5 原生指令處理：關機與取消關機 (遠端遙控 Windows 關機)
+                            if (cmd === '關機' || cmd === 'shutdown' || cmd.includes('關電腦') || cmd.includes('關機')) {
+                                sendTelegramMessage(chatId, `🖥️ <b>收到關機要求！</b>\n系統已啟動 Windows 關機排程（將於 30 秒後關閉本機電腦）。\n\n若需取消關機，請立刻在 Telegram 輸入：\n<code>取消關機</code> 或 <code>abort</code>`);
+                                spawn('shutdown.exe', ['/s', '/t', '30', '/c', 'Telegram Bridge Requested Shutdown']);
+                                return;
+                            }
+
+                            if (cmd === '取消關機' || cmd === 'abort' || cmd.includes('取消關機')) {
+                                sendTelegramMessage(chatId, `✅ <b>已成功取消 Windows 關機排程！</b>`);
+                                spawn('shutdown.exe', ['/a']);
+                                return;
+                            }
  
                             // 4. 其他一般指令，寫入 Inbox 提交給 AI
                             fs.appendFileSync(INBOX_PATH, line, 'utf8');
