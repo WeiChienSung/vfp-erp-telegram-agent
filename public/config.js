@@ -50,9 +50,10 @@ function renderBots() {
         const card = document.createElement("div");
         card.className = "bot-card";
         
-        // 判斷功能勾選狀態 (只保留 query 與 history，移除 take 與 push)
+        // 判斷功能勾選狀態 (只保留 query 與 history，移除 take 與 push，並加入即時斷貨告警 instant_alert)
         const hasQuery = bot.features.includes("query") ? "checked" : "";
         const hasHistory = bot.features.includes("history") ? "checked" : "";
+        const hasInstantAlert = bot.features.includes("instant_alert") ? "checked" : "";
 
         // 渲染授權聊天室標籤
         let chatBadges = "";
@@ -93,6 +94,9 @@ function renderBots() {
                     </label>
                     <label class="checkbox-container">
                         <input type="checkbox" ${hasHistory} onchange="toggleBotFeature(${bIndex}, 'history', this.checked)"> 歷史成交查詢 (History)
+                    </label>
+                    <label class="checkbox-container">
+                        <input type="checkbox" ${hasInstantAlert} onchange="toggleBotFeature(${bIndex}, 'instant_alert', this.checked)"> 即時斷貨告警 (Instant Alert)
                     </label>
                 </div>
             </div>

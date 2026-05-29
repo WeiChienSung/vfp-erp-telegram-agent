@@ -4,6 +4,7 @@ const path = require('path');
 const net = require('net');
 const http = require('http');
 const { spawn } = require('child_process');
+const { detectStockChanges } = require('./zero_stock_alert.js');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const ACTIVE_URL_PATH = path.join(__dirname, '..', 'active_url.txt');
@@ -1024,6 +1025,37 @@ function sendTelegramMessage(token, chatId, text, replyMarkup = null, retryCount
     req.end();
 }
 
+// 3.01 答覆 Callback Query 通訊模組
+function answerCallbackQuery(token, callbackQueryId) {
+    const postData = JSON.stringify({
+        callback_query_id: callbackQueryId
+    });
+    
+    const options = {
+        hostname: 'api.telegram.org',
+        port: 443,
+        path: `/bot${token}/answerCallbackQuery`,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+        },
+        timeout: 5000
+    };
+    
+    const req = https.request(options, (res) => {
+        // 靜默處理回傳
+        res.on('data', () => {});
+    });
+    
+    req.on('error', (err) => {
+        console.error('[Telegram] answerCallbackQuery 網路錯誤:', err.message);
+    });
+    
+    req.write(postData);
+    req.end();
+}
+
 // 3.1 雲端試算表欠貨查詢通訊模組
 function fetchBackordersFromSheets(webhookUrl) {
     return new Promise((resolve, reject) => {
@@ -1253,6 +1285,65 @@ class TelegramBotInstance {
     }
 
     async processUpdate(update) {
+        // 處理 Inline Keyboard 快捷按鈕點擊事件 (Callback Query)
+        if (update.callback_query) {
+            const callbackQuery = update.callback_query;
+            const data = callbackQuery.data || '';
+            const chatId = callbackQuery.message.chat.id;
+            
+            // 立即答覆 Telegram，防按鈕圈圈一直轉
+            answerCallbackQuery(this.token, callbackQuery.id);
+            
+            if (data.startsWith('hist:')) {
+                const prodNo = data.substring(5).trim();
+                const ougo1DbPath = path.join(path.dirname(config.databasePath), 'ougo1.dbf');
+                const myKeyboard = getBotKeyboard(this);
+                
+                try {
+                    console.log(`[即時查詢 - ${this.name}] 收到一鍵查詢商品 [${prodNo}] 歷史成交價 (Chat ID: ${chatId})`);
+                    
+                    const history = queryDbfOptimized(ougo1DbPath, (record) => {
+                        return normalizeText(record.MNO) === normalizeText(prodNo);
+                    }, {
+                        reverse: true,
+                        limit: 3,
+                        fieldsToExtract: ['ACC', 'DAT', 'NO', 'NAME', 'MNO', 'MNAME', 'QUT', 'UNIT', 'PRICE', 'TOT']
+                    });
+                    
+                    let reply = `🔍 <b>商品歷史銷貨紀錄（最新 3 筆）：</b>\n`;
+                    reply += `📦 商品代號：<code>${prodNo}</code>\n\n`;
+                    
+                    if (history.length === 0) {
+                        reply += `<i>此商品在近期銷貨明細中沒有任何成交紀錄。</i>`;
+                    } else {
+                        reply += `品名：<b>${history[0].MNAME}</b>\n`;
+                        reply += `-----------------------------------\n\n`;
+                        
+                        history.forEach((rec, idx) => {
+                            const dateStr = rec.DAT.substring(0, 4) + '/' + rec.DAT.substring(4, 6) + '/' + rec.DAT.substring(6, 8);
+                            const nameStr = rec.MNAME || '';
+                            const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
+                            const stopBadge = isStopped ? ' ⛔ <b>[已停售]</b>' : '';
+                            
+                            reply += `📅 <b>${dateStr}</b>${stopBadge}\n`;
+                            reply += `🏢 客戶：<b>[${rec.NO}] ${rec.NAME.trim()}</b>\n`;
+                            reply += `📊 數量：<b>${rec.QUT}</b> ${rec.UNIT.trim()}\n`;
+                            reply += `💵 單價：<b>$${rec.PRICE.toLocaleString()}</b>\n`;
+                            reply += `💰 小計：$${rec.TOT.toLocaleString()}\n\n`;
+                            if (idx < history.length - 1) {
+                                reply += `-----------------------------------\n\n`;
+                            }
+                        });
+                    }
+                    sendTelegramMessage(this.token, chatId, reply, myKeyboard);
+                } catch (err) {
+                    console.error('[即時查詢錯誤] 查詢商品歷史成交失敗:', err.message);
+                    sendTelegramMessage(this.token, chatId, `⚠️ <b>歷史成交查詢失敗</b>\n(原因: ${err.message})`, myKeyboard);
+                }
+            }
+            return;
+        }
+
         if (!update.message || !update.message.text) return;
         
         const chatId = update.message.chat.id;
@@ -1706,6 +1797,130 @@ function reconcileBots() {
             instance.start();
         }
     }
+    setupZeroStockAlertTimer();
+}
+
+// 6. 即時斷貨告警模組串接與背景定時器
+let zeroStockAlertInterval = null;
+
+function setupZeroStockAlertTimer() {
+    if (zeroStockAlertInterval) {
+        clearInterval(zeroStockAlertInterval);
+        zeroStockAlertInterval = null;
+        console.log('[系統] 已清理舊的即時斷貨輪詢定時器。');
+    }
+    
+    const hasAnyAlertBot = (config.bots || []).some(b => {
+        const features = b.features || [];
+        return features.includes('instant_alert');
+    });
+    
+    if (hasAnyAlertBot) {
+        console.log('[系統] 偵測到啟用即時告警的機器人，初始化一分鐘輪詢服務...');
+        zeroStockAlertInterval = setInterval(checkInstantZeroStockAlert, 60000);
+    }
+}
+
+function checkInstantZeroStockAlert() {
+    try {
+        const currentRecords = getStockRecords(config.databasePath);
+        const { outOfStockAlerts, lowStockAlerts } = detectStockChanges(currentRecords, config);
+        
+        if (outOfStockAlerts.length === 0 && lowStockAlerts.length === 0) {
+            return;
+        }
+        
+        const alertBots = (config.bots || []).filter(b => {
+            const features = b.features || [];
+            return b.token && features.includes('instant_alert') && Array.isArray(b.authorizedChats) && b.authorizedChats.length > 0;
+        });
+        
+        if (alertBots.length === 0) return;
+        
+        const textMessage = formatAlertMessage(outOfStockAlerts, lowStockAlerts);
+        if (!textMessage) return;
+        
+        // 彙整 Inline Keyboard 按鈕，對列表中最多前 5 個告警商品產生歷史查詢按鈕
+        const buttons = [];
+        const combinedList = [...outOfStockAlerts, ...lowStockAlerts].slice(0, 5);
+        combinedList.forEach(item => {
+            const shortName = (item.NAME || '').substring(0, 12).trim();
+            buttons.push([{
+                text: `🔍 查 ${shortName}... 歷史成交`,
+                callback_data: `hist:${item.NO}`
+            }]);
+        });
+        
+        const replyMarkup = buttons.length > 0 ? { inline_keyboard: buttons } : null;
+        
+        for (const bot of alertBots) {
+            for (const chatId of bot.authorizedChats) {
+                sendTelegramMessage(bot.token, chatId, textMessage, replyMarkup);
+            }
+        }
+        console.log(`[即時告警] 成功對 ${alertBots.length} 個機器人發送 ${outOfStockAlerts.length} 筆斷貨、${lowStockAlerts.length} 筆主力低存推播。`);
+    } catch (err) {
+        console.error('[即時告警錯誤] 輪詢檢測失敗:', err.message);
+    }
+}
+
+function formatAlertMessage(outOfStockList, lowStockList) {
+    if (outOfStockList.length === 0 && lowStockList.length === 0) return null;
+    
+    let reply = "";
+    const totalAlerts = outOfStockList.length + lowStockList.length;
+    
+    if (totalAlerts > 1) {
+        reply += `🚨 <b>【商品斷貨與低存彙整通知】</b>\n`;
+        reply += `=====================\n\n`;
+        
+        if (outOfStockList.length > 0) {
+            reply += `❌ <b>已售罄商品：</b>\n`;
+            for (const item of outOfStockList) {
+                const name = item.NAME || '未命名商品';
+                const no = item.NO || '無編號';
+                const unit = (item.UNIT || '').trim();
+                reply += `• <b>${name}</b> (<code>${no}</code>)\n`;
+                reply += `  庫存已歸零 ➔ <b>0</b> ${unit}\n\n`;
+            }
+        }
+        
+        if (lowStockList.length > 0) {
+            reply += `⚠️ <b>主力商品低存預警：</b>\n`;
+            for (const item of lowStockList) {
+                const name = item.NAME || '未命名商品';
+                const no = item.NO || '無編號';
+                const unit = (item.UNIT || '').trim();
+                reply += `• <b>${name}</b> (<code>${no}</code>)\n`;
+                reply += `  殘餘庫存 ➔ ⏳ <b>${item.INVQT}</b> ${unit} (門檻: ${config.lowStockThreshold})\n\n`;
+            }
+        }
+    } else {
+        if (outOfStockList.length === 1) {
+            const item = outOfStockList[0];
+            const name = item.NAME || '未命名商品';
+            const no = item.NO || '無編號';
+            const unit = (item.UNIT || '').trim();
+            reply += `🚨 <b>【商品已售罄警報】</b>\n`;
+            reply += `---------------------\n`;
+            reply += `🏷️ 品名：<b>${name}</b>\n`;
+            reply += `📦 代號：<code>${no}</code>\n`;
+            reply += `📊 庫存：<b>0</b> ${unit}\n\n`;
+        } else if (lowStockList.length === 1) {
+            const item = lowStockList[0];
+            const name = item.NAME || '未命名商品';
+            const no = item.NO || '無編號';
+            const unit = (item.UNIT || '').trim();
+            reply += `⚠️ <b>【主力商品低庫存警訊】</b>\n`;
+            reply += `---------------------\n`;
+            reply += `🏷️ 品名：<b>${name}</b>\n`;
+            reply += `📦 代號：<code>${no}</code>\n`;
+            reply += `📊 殘餘庫存：<b>${item.INVQT}</b> ${unit} (門檻: ${config.lowStockThreshold})\n\n`;
+        }
+    }
+    
+    reply += `🕒 時間：${new Date().toLocaleString('zh-TW', { hour12: false })}`;
+    return reply;
 }
 
 function updateGlobalBotChats(token, authorizedChats) {
