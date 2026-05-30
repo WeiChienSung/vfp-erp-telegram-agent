@@ -486,9 +486,23 @@
   5. **對話紀錄同步與推送**：
      - 更新對話紀錄文字檔並將所有變更 commit、push 至 GitHub 倉庫。
 
+【第十九階段：資料夾結構全面優化與 AGI Messenger 穩定性及自癒能力深度加固】
+* 用戶與架構審查提出：
+  - 改善 `@agy_messenger_bot` 的穩定性，防止在處理圖片、網路波動、檔案寫入鎖定、子程序啟動失敗或 `fs.watch` 檔案變更異常時崩潰。
+  - 將專案根目錄提升至 `C:\agy_Add_on` 作為 Git 倉庫，消除 nested Git 倉庫，重構資料夾結構（劃分為 `engine/`、`ai_assistant/`、`bin/`、`scripts/`、`logs/` 等子目錄），使整體專案更容易維護。
+* 開發與實作：
+  1. **全方位穩定性防禦升級**：
+     - 在 `telegram_bridge.js` 中對 `downloadTelegramFile` 加固，新增 `safeCallback` 機制防止二次回呼引發崩潰，並加上對 `fileStream` 及網路請求的 `error` 監聽。
+     - 為所有 `spawn` 的子進程 (`powershell.exe`, `shutdown.exe`) 註冊 `error` 監聽器，防止進程無法啟動時崩潰。
+     - 為 `fs.watch` 檔案監聽器添加 `error` 事件處理。
+     - 在輪詢發生 API 衝突或錯誤時，輸出具體日誌（如 409 Conflict），並於程式末尾註冊全域 `uncaughtException` 和 `unhandledRejection` 自癒防護，實現 24/7 自動重連而不崩潰。
+  2. **專案目錄結構全面重構與優化**：
+     - 整合所有 Node 程式與啟動腳本至主資料夾 `C:\agy_Add_on`，建立統一的 `package.json` 與 `.gitignore`。
+     - 移動核心服務至 `engine/`，對答橋接器至 `ai_assistant/`，自癒監視與執行檔至 `bin/`，無視窗背景啟動腳本至 `scripts/`。
+     - 修改 Windows Startup 資料夾中的 `ERP_隨身查.vbs` 與 Windows 工作排程器中的 `VFP_ERP_Service_Monitor` 以使用新路徑，成功以背景分離模式（WScript）拉起服務，徹底解耦 sandbox 生效期，保證開機順暢運行。
+  3. **使用說明與紀錄同步**：
+     - 更新說明文件並同步寫入本機 `使用說明.txt` 與 `對話紀錄.txt`。
+
 ======================================================================
-更新時間：2026-05-30 (Bot 更新與圖片/監聽優化版)
+更新時間：2026-05-31 (新增結構重構與 AI 助理穩定性自癒加固版)
 ======================================================================
-
-
-
