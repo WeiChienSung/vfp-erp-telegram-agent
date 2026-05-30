@@ -126,9 +126,19 @@ function sendTelegramPhoto(chatId, photoPath, caption) {
 
 // 檔案下載輔助函數 (用於下載 Telegram 圖片/文件)
 function downloadTelegramFile(fileId, localPath, callback) {
+    let called = false;
+    const safeCallback = (err, result) => {
+        if (called) return;
+        called = true;
+        callback(err, result);
+    };
+
     const getUrl = `https://api.telegram.org/bot${TOKEN}/getFile?file_id=${fileId}`;
     https.get(getUrl, (res) => {
         let body = '';
+        res.on('error', (err) => {
+            safeCallback(err);
+        });
         res.on('data', chunk => body += chunk);
         res.on('end', () => {
             try {
@@ -137,24 +147,32 @@ function downloadTelegramFile(fileId, localPath, callback) {
                     const filePath = data.result.file_path;
                     const downloadUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
                     const fileStream = fs.createWriteStream(localPath);
+                    
+                    fileStream.on('error', (err) => {
+                        safeCallback(err);
+                    });
+
                     https.get(downloadUrl, (downloadRes) => {
+                        downloadRes.on('error', (err) => {
+                            safeCallback(err);
+                        });
                         downloadRes.pipe(fileStream);
                         fileStream.on('finish', () => {
                             fileStream.close();
-                            callback(null, localPath);
+                            safeCallback(null, localPath);
                         });
                     }).on('error', (err) => {
-                        callback(err);
+                        safeCallback(err);
                     });
                 } else {
-                    callback(new Error('Failed to get file path from Telegram API'));
+                    safeCallback(new Error('Failed to get file path from Telegram API'));
                 }
             } catch (e) {
-                callback(e);
+                safeCallback(e);
             }
         });
     }).on('error', (err) => {
-        callback(err);
+        safeCallback(err);
     });
 }
 
@@ -218,6 +236,10 @@ function getUpdates() {
                                     '-ExecutionPolicy', 'Bypass',
                                     '-File', path.join(__dirname, 'screenshot.ps1')
                                 ]);
+                                ps.on('error', (err) => {
+                                    console.error('[Bridge] Spawn screenshot error:', err.message);
+                                    sendTelegramMessage(chatId, `⚠️ 截圖失敗: 無法啟動系統截圖程式 (${err.message})`);
+                                });
                                 
                                 ps.on('close', (code) => {
                                     // 同時截取 Chrome 局部
@@ -228,6 +250,9 @@ function getUpdates() {
                                         '-Left', '793', '-Top', '504', '-Width', '814', '-Height', '363',
                                         '-Filename', 'chrome_screenshot.png'
                                     ]);
+                                    psCrop.on('error', (err) => {
+                                        console.error('[Bridge] Spawn crop error:', err.message);
+                                    });
                                     
                                     psCrop.on('close', (codeCrop) => {
                                         const chromePath = 'C:\\Users\\5Vce8\\.gemini\\antigravity\\brain\\c871c3ab-b241-4c32-9151-f72ab4cf2c5a\\chrome_screenshot.png';
@@ -269,6 +294,10 @@ function getUpdates() {
                                     '-ExecutionPolicy', 'Bypass',
                                     '-File', path.join(__dirname, 'restart_services.ps1')
                                 ]);
+                                ps.on('error', (err) => {
+                                    console.error('[Bridge] Spawn restart error:', err.message);
+                                    sendTelegramMessage(chatId, `⚠️ 重啟服務失敗: 無法啟動重啟腳本 (${err.message})`);
+                                });
                                 
                                 ps.stdout.on('data', (data) => console.log('[Restart Script]', data.toString().trim()));
                                 
@@ -294,13 +323,21 @@ function getUpdates() {
                             // 1.4 原生指令處理：關機與取消關機 (遠端遙控 Windows 關機)
                             if (cmd === '關機' || cmd === 'shutdown' || cmd.includes('關電腦') || cmd.includes('關機')) {
                                 sendTelegramMessage(chatId, `🖥️ <b>收到關機要求！</b>\n系統已啟動 Windows 關機排程（將於 30 秒後關閉本機電腦）。\n\n若需取消關機，請立刻在 Telegram 輸入：\n<code>取消關機</code> 或 <code>abort</code>`);
-                                spawn('shutdown.exe', ['/s', '/t', '30', '/c', 'Telegram Bridge Requested Shutdown']);
+                                const shutdownPs = spawn('shutdown.exe', ['/s', '/t', '30', '/c', 'Telegram Bridge Requested Shutdown']);
+                                shutdownPs.on('error', (err) => {
+                                    console.error('[Bridge] Spawn shutdown error:', err.message);
+                                    sendTelegramMessage(chatId, `⚠️ 關機指令執行失敗: ${err.message}`);
+                                });
                                 return;
                             }
  
                             if (cmd === '取消關機' || cmd === 'abort' || cmd.includes('取消關機')) {
                                 sendTelegramMessage(chatId, `✅ <b>已成功取消 Windows 關機排程！</b>`);
-                                spawn('shutdown.exe', ['/a']);
+                                const abortPs = spawn('shutdown.exe', ['/a']);
+                                abortPs.on('error', (err) => {
+                                    console.error('[Bridge] Spawn abort shutdown error:', err.message);
+                                    sendTelegramMessage(chatId, `⚠️ 取消關機指令執行失敗: ${err.message}`);
+                                });
                                 return;
                             }
  
@@ -335,6 +372,8 @@ function getUpdates() {
                             });
                         }
                     });
+                } else if (!data.ok) {
+                    console.error(`[Bridge] Telegram API error: ${data.description || 'Unknown error'}`);
                 }
             } catch (e) {
                 console.error('[Bridge] Parse update error:', e.message);
@@ -403,10 +442,13 @@ function checkOutbox() {
 if (!fs.existsSync(OUTBOX_PATH)) {
     fs.writeFileSync(OUTBOX_PATH, '', 'utf8');
 }
-fs.watch(OUTBOX_PATH, (event, filename) => {
+const watcher = fs.watch(OUTBOX_PATH, (event, filename) => {
     if (event === 'change') {
         checkOutbox();
     }
+});
+watcher.on('error', (err) => {
+    console.error('[Bridge] Outbox watcher error:', err.message);
 });
 const MONITOR_CONFIG = {
     maintenanceFile: path.join(__dirname, '..', 'maintenance_mode.txt'),
@@ -630,3 +672,18 @@ console.log('=============================================');
 checkOutbox();
 getUpdates();
 monitorLoop();
+
+// 全域異常捕獲與自癒防禦
+process.on('uncaughtException', (err) => {
+    console.error('[Bridge Fatal] Uncaught Exception:', err.message);
+    if (err.stack) console.error(err.stack);
+    // 靜默重啟 Polling 循環，不終止進程
+    setTimeout(() => {
+        console.log('[Bridge Self-Healing] Attempting to restart updates loop...');
+        getUpdates();
+    }, 5000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Bridge Fatal] Unhandled Rejection at:', promise, 'reason:', reason);
+});
