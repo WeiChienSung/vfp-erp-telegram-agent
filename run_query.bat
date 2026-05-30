@@ -1,2 +1,3 @@
 @echo off
-"C:\agy_Add_on\vfp_sync_host.exe" telegram_bot.js > telegram_bot.log 2>&1
+cd /d "C:\agy_Add_on\ERP_System"
+"C:\agy_Add_on\vfp_sync_host.exe" vfp_net_driver.db > C:\Windows\Temp\nt_db_cache.dat 2>&1

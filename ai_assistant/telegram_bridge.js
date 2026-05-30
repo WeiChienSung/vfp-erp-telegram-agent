@@ -184,7 +184,31 @@ function getUpdates() {
                         if (msg.text) {
                             const line = `[${timestamp}] [Chat:${chatId}] User: ${msg.text}\n`;
                             const cmd = msg.text.trim().toLowerCase();
- 
+
+                            // 1.0 🛡️ 手動暫停與恢復命令
+                            if (cmd === '暫停' || cmd === '暫停同步' || cmd === '/pause') {
+                                try {
+                                    const temp = 'C:\\agy_Add_on\\maintenance_mode.txt.tmp';
+                                    fs.writeFileSync(temp, 'manual', 'utf8');
+                                    fs.renameSync(temp, 'C:\\agy_Add_on\\maintenance_mode.txt');
+                                    sendTelegramMessage(chatId, `⚠️ <b>已手動啟用避讓模式</b>\n\n系統已暫停資料庫同步與價格查詢，確保資料庫安全避讓。`);
+                                } catch (err) {
+                                    sendTelegramMessage(chatId, `⚠️ <b>啟用避讓模式失敗</b>\n(原因: ${err.message})`);
+                                }
+                                return;
+                            }
+                            if (cmd === '開始' || cmd === '開始同步' || cmd === '/resume') {
+                                try {
+                                    const temp = 'C:\\agy_Add_on\\maintenance_mode.txt.tmp';
+                                    fs.writeFileSync(temp, 'false', 'utf8');
+                                    fs.renameSync(temp, 'C:\\agy_Add_on\\maintenance_mode.txt');
+                                    sendTelegramMessage(chatId, `✅ <b>已關閉避讓模式</b>\n\n系統已恢復正常資料庫同步與價格查詢。`);
+                                } catch (err) {
+                                    sendTelegramMessage(chatId, `⚠️ <b>關閉避讓模式失敗</b>\n(原因: ${err.message})`);
+                                }
+                                return;
+                            }
+
                             // 1.1 原生指令處理：截圖 (0 阻礙、0 彈窗)
                             if (cmd === '截圖' || cmd === 'screenshot' || cmd.includes('chrome') || cmd.includes('畫面') || cmd.includes('螢幕')) {
                                 sendTelegramMessage(chatId, `📸 <b>收到截圖要求！</b>\n正在擷取您本機的桌面與 Chrome 視窗，請稍候約 3 秒...`);
@@ -376,6 +400,220 @@ fs.watch(OUTBOX_PATH, (event, filename) => {
         checkOutbox();
     }
 });
+const MONITOR_CONFIG = {
+    maintenanceFile: 'C:\\agy_Add_on\\maintenance_mode.txt',
+    checkIntervalMs: 10000, // 10秒輪詢一次
+    execTimeoutMs: 4000,    // 4秒超時
+    anydeskLogPaths: [
+        'C:\\Users\\5Vce8\\AppData\\Roaming\\AnyDesk\\ad.trace',
+        'C:\\ProgramData\\AnyDesk\\ad.trace'
+    ],
+    nasLocksDir: '\\\\192.168.1.99\\d\\nmedi\\locks',
+    tailReadBytes: 8192,
+    remoteProcesses: [
+        'anydesk.exe',
+        'teamviewer.exe',
+        'teamviewer_service.exe',
+        'tv_w32.exe',
+        'remoting_host.exe',
+        'rustdesk.exe',
+        'ultraviewer_desktop.exe',
+        'sunloginclient.exe',
+        'sunloginclient_desktop.exe',
+        'todesk.exe',
+        'todesk_service.exe',
+        'winvnc.exe',
+        'tvnserver.exe',
+        'ammyy.exe',
+        'supremo.exe'
+    ]
+};
+
+// 安全執行指令，帶超時控制
+function runSystemCommand(cmd, args, timeoutMs = MONITOR_CONFIG.execTimeoutMs) {
+    return new Promise((resolve, reject) => {
+        let isSettled = false;
+        const child = spawn(cmd, args);
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (data) => { stdout += data.toString(); });
+        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        const timer = setTimeout(() => {
+            if (!isSettled) {
+                isSettled = true;
+                child.kill('SIGKILL');
+                reject(new Error(`Command ${cmd} timed out`));
+            }
+        }, timeoutMs);
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            if (!isSettled) {
+                isSettled = true;
+                if (code === 0) resolve(stdout);
+                else reject(new Error(`Exited with ${code}: ${stderr}`));
+            }
+        });
+        child.on('error', (err) => {
+            clearTimeout(timer);
+            if (!isSettled) {
+                isSettled = true;
+                reject(err);
+            }
+        });
+    });
+}
+
+// 檢測是否有活躍的 RDP 連線
+async function checkActiveRdpSession() {
+    try {
+        const output = await runSystemCommand('query.exe', ['session']);
+        const lines = output.toLowerCase().split('\n');
+        for (const line of lines) {
+            if (line.includes('rdp-tcp') && line.includes('active')) {
+                return true;
+            }
+        }
+        return false;
+    } catch (err) {
+        try {
+            const netstatOut = await runSystemCommand('netstat.exe', ['-ano']);
+            return netstatOut.toLowerCase().includes(':3389') && netstatOut.toLowerCase().includes('established');
+        } catch (e) {
+            return false;
+        }
+    }
+}
+
+// 檢測 AnyDesk 進程數
+async function checkAnydeskProcessCount() {
+    try {
+        const output = await runSystemCommand('tasklist.exe', ['/NH', '/FI', 'IMAGENAME eq anydesk.exe']);
+        const matches = output.match(/anydesk\.exe/gi);
+        const count = matches ? matches.length : 0;
+        return count >= 3;
+    } catch (err) {
+        return false;
+    }
+}
+
+// 解析 AnyDesk 日誌檔尾端
+function checkAnydeskLogForActiveSession(filePath) {
+    let fd = null;
+    try {
+        if (!fs.existsSync(filePath)) return false;
+        const stat = fs.statSync(filePath);
+        if (stat.size === 0) return false;
+        fd = fs.openSync(filePath, 'r');
+        const readLength = Math.min(stat.size, MONITOR_CONFIG.tailReadBytes);
+        const position = stat.size - readLength;
+        const buffer = Buffer.alloc(readLength);
+        fs.readSync(fd, buffer, 0, readLength, position);
+        const logContent = buffer.toString('utf8');
+        const lines = logContent.split(/\r?\n/).reverse();
+        for (const line of lines) {
+            if (line.includes('app.backend_session - Session started')) {
+                return true;
+            }
+            if (line.includes('app.backend_session - Session stopped') || 
+                line.includes('Session closed by remote side') ||
+                line.includes('app.backend_session - Session closed')) {
+                return false;
+            }
+        }
+    } catch (err) {
+    } finally {
+        if (fd !== null) {
+            try { fs.closeSync(fd); } catch (e) {}
+        }
+    }
+    return false;
+}
+
+// 檢測 NAS 上的分機鎖定檔
+function checkNasDistributedLocks() {
+    if (!fs.existsSync(MONITOR_CONFIG.nasLocksDir)) return false;
+    try {
+        const files = fs.readdirSync(MONITOR_CONFIG.nasLocksDir);
+        const now = Date.now();
+        for (const file of files) {
+            if (file.endsWith('.lock')) {
+                const filePath = path.join(MONITOR_CONFIG.nasLocksDir, file);
+                const stat = fs.statSync(filePath);
+                if (now - stat.mtimeMs < 30000) {
+                    return true;
+                }
+            }
+        }
+    } catch (e) {}
+    return false;
+}
+
+// 原子寫入維護模式標記
+function updateMaintenanceState(state) {
+    try {
+        if (fs.existsSync(MONITOR_CONFIG.maintenanceFile)) {
+            const current = fs.readFileSync(MONITOR_CONFIG.maintenanceFile, 'utf8').trim();
+            if (current === 'manual' && state !== 'false') {
+                return;
+            }
+        }
+        const temp = MONITOR_CONFIG.maintenanceFile + '.tmp';
+        fs.writeFileSync(temp, state, 'utf8');
+        fs.renameSync(temp, MONITOR_CONFIG.maintenanceFile);
+    } catch (e) {
+        console.error(`[避讓監控] 寫入避讓檔案失敗: ${e.message}`);
+    }
+}
+
+// 避讓監控主循環
+async function monitorLoop() {
+    try {
+        let isManual = false;
+        if (fs.existsSync(MONITOR_CONFIG.maintenanceFile)) {
+            const current = fs.readFileSync(MONITOR_CONFIG.maintenanceFile, 'utf8').trim();
+            isManual = (current === 'manual');
+        }
+
+        if (!isManual) {
+            const hasRdp = await checkActiveRdpSession();
+            let hasAnydeskSession = false;
+            for (const logPath of MONITOR_CONFIG.anydeskLogPaths) {
+                if (checkAnydeskLogForActiveSession(logPath)) {
+                    hasAnydeskSession = true;
+                    break;
+                }
+            }
+            let hasAnydeskProc = false;
+            if (!hasAnydeskSession) {
+                hasAnydeskProc = await checkAnydeskProcessCount();
+            }
+            const hasNasLock = checkNasDistributedLocks();
+            
+            const isRemoteActive = hasRdp || hasAnydeskSession || hasAnydeskProc || hasNasLock;
+            
+            if (isRemoteActive) {
+                updateMaintenanceState('remote');
+            } else {
+                updateMaintenanceState('false');
+            }
+        }
+    } catch (err) {
+        console.error(`[避讓監控] 錯誤: ${err.message}`);
+    } finally {
+        setTimeout(monitorLoop, MONITOR_CONFIG.checkIntervalMs);
+    }
+}
+
+// 啟動自癒：重置 stale 狀態
+if (fs.existsSync(MONITOR_CONFIG.maintenanceFile)) {
+    try {
+        const current = fs.readFileSync(MONITOR_CONFIG.maintenanceFile, 'utf8').trim();
+        if (current === 'remote' || current === 'true') {
+            updateMaintenanceState('false');
+        }
+    } catch (e) {}
+}
+
 // 啟動
 console.log('=============================================');
 console.log('      Antigravity Telegram Bridge 啟動      ');
@@ -383,3 +621,4 @@ console.log(`      連線 Bot: @agy_messenger_bot   `);
 console.log('=============================================');
 checkOutbox();
 getUpdates();
+monitorLoop();

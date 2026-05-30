@@ -3,6 +3,44 @@ const https = require('https');
 const path = require('path');
 const net = require('net');
 const http = require('http');
+
+// 🛡️ [安全防禦] 全域 Token 遮蔽器：複寫 console 輸出，防止 Stack Trace 洩露憑證
+const sanitizeMessage = (msg) => {
+    if (typeof msg !== 'string') return msg;
+    return msg.replace(/\/bot\d+:[a-zA-Z0-9_-]+/g, '/bot<TELEGRAM_BOT_TOKEN_MASKED>');
+};
+
+const originalError = console.error;
+console.error = function (...args) {
+    const sanitized = args.map(arg => {
+        if (arg instanceof Error) {
+            arg.message = sanitizeMessage(arg.message);
+            if (arg.stack) arg.stack = sanitizeMessage(arg.stack);
+            return arg;
+        }
+        return sanitizeMessage(String(arg));
+    });
+    originalError.apply(console, sanitized);
+};
+
+const originalWarn = console.warn;
+console.warn = function (...args) {
+    const sanitized = args.map(arg => sanitizeMessage(String(arg)));
+    originalWarn.apply(console, sanitized);
+};
+
+process.on('uncaughtException', (err) => {
+    console.error('[系統崩潰防禦] 未捕獲的異常 (已遮蔽 Token):', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[系統崩潰防禦] 未處理的 Promise 拒絕 (已遮蔽 Token):', reason);
+});
+
+// 🛡️ 背景雷達避讓狀態變數
+const fsPromises = fs.promises;
+let isNasAvailable = true;
+let isDbLocked = false;
+let nasCheckInProgress = false;
 const { spawn } = require('child_process');
 const { detectStockChanges } = require('./zero_stock_alert.js');
 
@@ -131,6 +169,12 @@ let stockCache = {
  * 避免每次查詢都重複執行檔案 I/O、Big5 解碼與欄位解析
  */
 function getStockRecords(dbPath) {
+    if (!isNasAvailable) {
+        throw new Error("無法連線至 NAS 資料庫，請確認網路共用磁碟已正常連線。");
+    }
+    if (isDbLocked) {
+        throw new Error("系統偵測到其他分機正處於維護或遠端連線狀態，資料庫已安全鎖定避讓。");
+    }
     let fileBuffer;
     let stat;
     let mtimeMs = 0;
@@ -372,7 +416,11 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
         }
         
         if (score > 0) {
-            // 🛡️ 防禦性設計：複製 record 以避免對快取中的原始資料進行屬性污染
+            // 🛡️ 防禦性設計：限制結果集大小，防範 CPU 與記憶體阻塞
+            if (results.length >= 1000) {
+                console.warn(`[查詢優化] 關鍵字 "${keyword}" 匹配超過 1000 筆，提早終止掃描。`);
+                break;
+            }
             const matchedRecord = Object.assign({}, record);
             matchedRecord._score = score;
             results.push(matchedRecord);
@@ -558,6 +606,8 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
 
     // Chunk size in records (e.g. 5000 records is ~3.7MB for 747 recordLength)
     const CHUNK_RECORDS = 5000;
+    const maxChunkBytes = CHUNK_RECORDS * recordLength;
+    const chunkBuf = Buffer.alloc(maxChunkBytes);
     
     if (reverse) {
         let currentEndRecord = recordCount - 1;
@@ -567,7 +617,6 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
             const chunkBytes = numRecordsInChunk * recordLength;
             const filePos = headerLength + currentStartRecord * recordLength;
             
-            const chunkBuf = Buffer.alloc(chunkBytes);
             fs.readSync(fd, chunkBuf, 0, chunkBytes, filePos);
             
             // Loop backward through the chunk in memory
@@ -611,7 +660,6 @@ function queryDbfOptimized(dbPath, filterFn, options = {}) {
             const chunkBytes = numRecordsInChunk * recordLength;
             const filePos = headerLength + currentStartRecord * recordLength;
             
-            const chunkBuf = Buffer.alloc(chunkBytes);
             fs.readSync(fd, chunkBuf, 0, chunkBytes, filePos);
             
             for (let r = 0; r < numRecordsInChunk; r++) {
@@ -742,6 +790,12 @@ let customerCache = {
  * 取得最新客戶紀錄（含記憶體快取與增量更新機制）
  */
 function getCustomerRecords(dbPath) {
+    if (!isNasAvailable) {
+        throw new Error("無法連線至 NAS 資料庫，請確認網路共用磁碟已正常連線。");
+    }
+    if (isDbLocked) {
+        throw new Error("系統偵測到其他分機正處於維護或遠端連線狀態，資料庫已安全鎖定避讓。");
+    }
     let fileBuffer;
     let stat;
     let mtimeMs = 0;
@@ -1212,6 +1266,25 @@ class TelegramBotInstance {
     poll() {
         if (!this.pollingActive) return;
 
+        // 🛡️ [深層睡眠] 檢查是否進入防禦維護模式 (AnyDesk/RDP 或手動暫停)
+        const maintenanceFile = 'C:\\agy_Add_on\\maintenance_mode.txt';
+        let isMaintenance = false;
+        if (fs.existsSync(maintenanceFile)) {
+            try {
+                const content = fs.readFileSync(maintenanceFile, 'utf8').trim();
+                isMaintenance = (content === 'manual' || content === 'remote' || content === 'true');
+            } catch(e) {}
+        }
+
+        if (isMaintenance) {
+            // 深層睡眠：暫停發送 getUpdates 請求，以 15 秒的極低頻率在背景安靜檢查
+            // 減少 CPU 與網路資源至 0，且不列印 console logs 以防 Task Manager command line 被察覺
+            setTimeout(() => {
+                this.poll();
+            }, 15000);
+            return;
+        }
+
         const pathUrl = `/bot${this.token}/getUpdates?offset=${this.updateOffset}&timeout=30`;
         const options = {
             hostname: 'api.telegram.org',
@@ -1285,6 +1358,16 @@ class TelegramBotInstance {
     }
 
     async processUpdate(update) {
+        // 🛡️ 防禦系統商：檢查是否處於避讓維護模式
+        const maintenanceFile = 'C:\\agy_Add_on\\maintenance_mode.txt';
+        let isMaintenance = false;
+        if (fs.existsSync(maintenanceFile)) {
+            try {
+                const content = fs.readFileSync(maintenanceFile, 'utf8').trim();
+                isMaintenance = (content === 'manual' || content === 'remote' || content === 'true');
+            } catch(e) {}
+        }
+
         // 處理 Inline Keyboard 快捷按鈕點擊事件 (Callback Query)
         if (update.callback_query) {
             const callbackQuery = update.callback_query;
@@ -1293,6 +1376,41 @@ class TelegramBotInstance {
             
             // 立即答覆 Telegram，防按鈕圈圈一直轉
             answerCallbackQuery(this.token, callbackQuery.id);
+
+            // 🛡️ 安全防禦：授權白名單安全守衛
+            const isAuthorized = this.authorizedChats.includes(chatId);
+            if (!isAuthorized) {
+                console.log(`[安全性 - ${this.name}] 拒絕未授權聊天室的 Callback Query 存取請求: (Chat ID: ${chatId})`);
+                sendTelegramMessage(
+                    this.token,
+                    chatId,
+                    `⚠️ <b>未獲授權的聊天室</b>\n\n本聊天室（ID: <code>${chatId}</code>）尚未獲得本系統授權，無法使用此機器人。`
+                );
+                return;
+            }
+
+            // 🛡️ 安全防禦：限流防刷 (1.5秒限制)
+            const now = Date.now();
+            const lastQuery = userLastQueryTime[chatId] || 0;
+            if (now - lastQuery < 1500) {
+                console.log(`[防刷 - ${this.name}] 攔截來自 [Chat ID: ${chatId}] 的頻繁 Callback Query 請求`);
+                sendTelegramMessage(
+                    this.token,
+                    chatId,
+                    `⚠️ <b>您的查詢頻率過快</b>\n\n系統正在為其他同仁服務，請稍候 1.5 秒後再試。`
+                );
+                return;
+            }
+            userLastQueryTime[chatId] = now;
+
+            if (isMaintenance) {
+                sendTelegramMessage(
+                    this.token, 
+                    chatId, 
+                    `⚠️ <b>系統維護中</b>\n\n目前系統商正在進行維護（或已手動暫停同步）。為避免檔案鎖定衝突，暫時關閉庫存與價格查詢。維護完成後將自動恢復，請稍後再試！`
+                );
+                return;
+            }
             
             if (data.startsWith('hist:')) {
                 const prodNo = data.substring(5).trim();
@@ -1349,6 +1467,20 @@ class TelegramBotInstance {
         const chatId = update.message.chat.id;
         const text = update.message.text.trim();
         const chatName = update.message.chat.title || update.message.chat.username || update.message.chat.first_name || '未知用戶';
+
+        // 🛡️ 防禦系統商：若處於維護模式，攔截非系統設定之查詢命令
+        if (isMaintenance) {
+            const cmd = text.toLowerCase();
+            const isSystemCommand = cmd === '/start' || cmd.startsWith('/register') || cmd === '設定' || cmd === '/config' || cmd === '⚙️ 管理後台';
+            if (!isSystemCommand) {
+                sendTelegramMessage(
+                    this.token,
+                    chatId,
+                    `⚠️ <b>系統維護中</b>\n\n目前系統商正在進行維護（或已手動暫停同步）。為避免檔案鎖定衝突，暫時關閉庫存與價格查詢。維護完成後將自動恢復，請稍後再試！`
+                );
+                return;
+            }
+        }
 
         // 🛡️ 安全防禦 1：全域輸入長度限制 (DoS 防禦)
         if (text.length > 200) {

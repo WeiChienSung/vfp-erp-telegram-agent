@@ -60,14 +60,20 @@ async function queryDbfOptimized(dbPath, filterFn, options = {}) {
     // 使用帶重試的非同步包裝器開啟檔案，防範 VFP 排他鎖定
     try {
         await executeWithRetry(() => {
-            fileSize = fs.statSync(actualPath).size;
-            fd = fs.openSync(actualPath, 'r');
-            fs.readSync(fd, metaBuf, 0, 32, 0);
+            let attemptFd;
+            try {
+                fileSize = fs.statSync(actualPath).size;
+                attemptFd = fs.openSync(actualPath, 'r');
+                fs.readSync(attemptFd, metaBuf, 0, 32, 0);
+                fd = attemptFd; // 僅在完全成功時，才將控制權交給外部變數
+            } catch (err) {
+                if (attemptFd) {
+                    try { fs.closeSync(attemptFd); } catch (e) {}
+                }
+                throw err;
+            }
         }, 5, 100);
     } catch (err) {
-        if (fd) {
-            try { fs.closeSync(fd); } catch (e) {}
-        }
         throw new Error(`無法安全開啟資料庫檔案 ${actualPath} (已重試 5 次): ${err.message}`);
     }
     
@@ -409,6 +415,18 @@ async function postToWebhookWithRetry(urlStr, data, maxRetries = 5, initialDelay
 
 // 主執行邏輯
 async function main() {
+    // 🛡️ 防禦系統商：檢查是否處於避讓維護模式
+    const maintenanceFile = 'C:\\agy_Add_on\\maintenance_mode.txt';
+    if (fs.existsSync(maintenanceFile)) {
+        try {
+            const content = fs.readFileSync(maintenanceFile, 'utf8').trim();
+            if (content === 'manual' || content === 'remote' || content === 'true') {
+                console.log(`[🛡️ 防禦隱蔽] 目前處於避讓維護模式 (${content})，為避免與系統商鎖定衝突，跳過本次同步。`);
+                process.exit(0);
+            }
+        } catch(e) {}
+    }
+
     console.log(`[同步 - ${new Date().toLocaleString()}] 啟動欠貨同步器...`);
 
     // 1. 載入 config.json

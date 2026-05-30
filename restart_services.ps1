@@ -1,3 +1,6 @@
+# 0. Sleep 15 seconds to wait for network/NAS to be ready on boot
+Start-Sleep -Seconds 15
+
 # 1. Force kill node processes on port 28256 (Bot) and port 3000 (Config Server)
 $ports = @(28256, 3000)
 foreach ($port in $ports) {
@@ -16,6 +19,12 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.
     Write-Output "Stopped telegram_bridge.js process $($_.ProcessId)"
 }
 
+# 2.1 Kill any running vfp_net_driver.db processes
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*vfp_net_driver.db*" -or $_.CommandLine -like "*telegram_bot.js*" } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Output "Stopped db/bot process $($_.ProcessId)"
+}
+
 Start-Sleep -Seconds 2
 
 # 3. Start Node services via wscript.exe wrappers to avoid Session 0 GUI restriction
@@ -24,3 +33,4 @@ wscript.exe "C:\agy_Add_on\run_take.vbs"
 wscript.exe "C:\agy_Add_on\run_bridge.vbs"
 
 Write-Output "Services restarted successfully (Query Bot, Local Config Server & AI Bridge)."
+
