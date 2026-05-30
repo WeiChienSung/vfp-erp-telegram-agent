@@ -3,7 +3,7 @@ const https = require('https');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const TOKEN = "8964386567:AAFTDXhIFL1N5RZG1-BMVKmFm0PmMhrgSVA"; // agy_messenger_bot
+const TOKEN = "8964386567:AAE647EF07jhTTAJL6PAAYQTejmLA0VmXaM"; // agy_messenger_bot
 const INBOX_PATH = path.join(__dirname, 'telegram_inbox.txt');
 const OUTBOX_PATH = path.join(__dirname, 'telegram_outbox.txt');
 
