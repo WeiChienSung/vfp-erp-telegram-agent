@@ -37,12 +37,12 @@ $objNotifyIcon.ContextMenu = $contextMenu
 
 # Click to open Telegram chat
 $menuChat.add_Click({
-    Start-Process "https://t.me/agy_assistant_helper_bot"
+    Start-Process "https://t.me/agy_messenger_bot"
 })
 
 # Double click tray icon to open Telegram chat
 $objNotifyIcon.add_DoubleClick({
-    Start-Process "https://t.me/agy_assistant_helper_bot"
+    Start-Process "https://t.me/agy_messenger_bot"
 })
 
 # Show LocalTunnel external URL

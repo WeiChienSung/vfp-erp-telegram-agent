@@ -223,7 +223,7 @@
 * 開發與實作：
   1. **Localtunnel 存活檢測與假死自愈**：在 `take_server.js` 中引入 90 秒 Keep-Alive 存活檢查。若連線超時則調用 `taskkill` 清理進程樹，並降級為隨機網域優先啟動，保證 100% 在線。
   2. **自愈降噪與持久化 Token**：限制只在初次啟動時推播網址，自愈重連一律靜音。修復了 localStorage 被錯誤結構污染導致的 401 故障。
-  3. **AI 雙向助理橋接程式 (telegram_bridge.js)**：建立橋接器輪詢 `@agy_assistant_helper_bot`，將普通對話寫入 `telegram_inbox.txt` 中轉給 AI。
+  3. **AI 雙向助理橋接程式 (telegram_bridge.js)**：建立橋接器輪詢 `@agy_messenger_bot`，將普通對話寫入 `telegram_inbox.txt` 中轉給 AI。
   4. **原生免審核指令攔截**：在 `telegram_bridge.js` 中實現了「`截圖`」、「`日誌`」、「`重啟`」的原生攔截執行，繞過 IDE 沙箱彈窗審核，直接在背景安全執行。
 
 【第十五階段：AI 助理專屬隔離、Windows 系統列托盤常駐監控與啟動整合】
@@ -418,7 +418,7 @@
 * 開發與實作：
   1. **Localtunnel 存活檢測與假死自愈**：在 `take_server.js` 中引入 90 秒 Keep-Alive 存活檢查。若連線超時則調用 `taskkill` 清理進程樹，並降級為隨機網域優先啟動，保證 100% 在線。
   2. **自愈降噪與持久化 Token**：限制只在初次啟動時推播網址，自愈重連一律靜音。修復了 localStorage 被錯誤結構污染導致的 401 故障。
-  3. **AI 雙向助理橋接程式 (telegram_bridge.js)**：建立橋接器輪詢 `@agy_assistant_helper_bot`，將普通對話寫入 `telegram_inbox.txt` 中轉給 AI。
+  3. **AI 雙向助理橋接程式 (telegram_bridge.js)**：建立橋接器輪詢 `@agy_messenger_bot`，將普通對話寫入 `telegram_inbox.txt` 中轉給 AI。
   4. **原生免審核指令攔截**：在 `telegram_bridge.js` 中實現了「`截圖`」、「`日誌`」、「`重啟`」的原生攔截執行，繞過 IDE 沙箱彈窗審核，直接在背景安全執行。
 
 【第十五階段：AI 助理專屬隔離、Windows 系統列托盤常駐監控與啟動整合】
