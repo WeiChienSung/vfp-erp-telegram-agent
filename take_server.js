@@ -78,24 +78,39 @@ function serveStaticFile(res, filePath, contentType) {
     });
 }
 
+function isPrivateIp(ip) {
+    if (!ip) return false;
+    const normalized = ip.replace(/^::ffff:/, '');
+    if (normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost') return true;
+    if (normalized.startsWith('192.168.') || normalized.startsWith('10.')) return true;
+    const parts = normalized.split('.');
+    if (parts.length === 4) {
+        const p1 = parseInt(parts[0], 10);
+        const p2 = parseInt(parts[1], 10);
+        if (p1 === 172 && p2 >= 16 && p2 <= 31) return true;
+    }
+    if (normalized.startsWith('fe80:') || normalized.startsWith('fc00:') || normalized.startsWith('fd00:')) return true;
+    return false;
+}
+
 function startWebServer() {
     const server = http.createServer((req, res) => {
         const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
         const pathname = parsedUrl.pathname;
 
-        // 偵測是否為本機端請求
+        // 偵測是否為本機端或區域網路請求
         const remoteIp = req.socket.remoteAddress;
         const host = req.headers.host || '';
         const cleanHost = host.split(':')[0].toLowerCase();
-        const isHostLocal = cleanHost === 'localhost' || cleanHost === '127.0.0.1' || cleanHost === 'lvh.me';
+        const isHostAllowed = cleanHost === 'localhost' || cleanHost === '127.0.0.1' || cleanHost === 'lvh.me' || isPrivateIp(cleanHost);
         const hasForwarded = req.headers['x-forwarded-for'] || req.headers['x-forwarded-host'] || req.headers['x-forwarded-proto'];
         
-        const isLocal = (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1') && isHostLocal && !hasForwarded;
+        const isLocal = isPrivateIp(remoteIp) && isHostAllowed && !hasForwarded;
 
-        // 設定後台與配置API僅限本機電腦開啟 (防止 Token 外洩)
+        // 設定後台與配置API僅限本機電腦或區域網路電腦開啟 (防止 Token 外洩)
         if (!isLocal && (pathname === '/' || pathname.startsWith('/config') || pathname === '/api/config')) {
             res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-            res.end('403 Forbidden: 設定後台僅限在本機電腦 (http://localhost:3000/config) 開啟。');
+            res.end('403 Forbidden: 設定後台僅限在本機或區域網路電腦 (http://localhost:3000/config) 開啟。');
             return;
         }
 
@@ -189,10 +204,10 @@ function startWebServer() {
         }
     });
 
-    // 關鍵！僅監聽 127.0.0.1，防堵任何外網/同網域其他設備存取，確保物理級本地安全
-    server.listen(3000, '127.0.0.1', () => {
-        console.log('[系統] 本機設定網頁伺服器已啟動，監聽 Port 3000 (限 localhost / 127.0.0.1 訪問)。');
-        console.log('[系統] 本機設定後台入口：http://localhost:3000/config');
+    // 監聽 0.0.0.0 以允許本機及區域網路 (LAN) 電腦進行管理與配置，安全性由 IP 篩選把關
+    server.listen(3000, '0.0.0.0', () => {
+        console.log('[系統] 設定網頁伺服器已啟動，監聽 Port 3000 (允許本機與同網域區域網路電腦訪問)。');
+        console.log('[系統] 設定後台入口：http://localhost:3000/config');
     });
 }
 
