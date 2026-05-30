@@ -161,7 +161,7 @@ function downloadTelegramFile(fileId, localPath, callback) {
 // 獲取 updates
 function getUpdates() {
     const url = `https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=30`;
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
         let body = '';
         res.on('data', (chunk) => body += chunk);
         res.on('end', () => {
@@ -342,7 +342,15 @@ function getUpdates() {
             // 繼續 polling
             setTimeout(getUpdates, 1000);
         });
-    }).on('error', (e) => {
+    });
+    
+    // 設定 45 秒連線超時，避免網路無聲斷線導致 Polling 卡死
+    req.setTimeout(45000, () => {
+        req.destroy();
+        console.warn('[Bridge] Polling request timed out. Aborting and retrying...');
+    });
+    
+    req.on('error', (e) => {
         console.error('[Bridge] Polling error:', e.message);
         setTimeout(getUpdates, 5000);
     });
