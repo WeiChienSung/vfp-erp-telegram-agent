@@ -3,7 +3,26 @@ const https = require('https');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const TOKEN = "8964386567:AAE647EF07jhTTAJL6PAAYQTejmLA0VmXaM"; // agy_messenger_bot
+// 載入 config.json 中的 Token
+const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+let TOKEN = "YOUR_AI_ASSISTANT_TOKEN_HERE"; // 請將實際 Token 設定在 config.json 的 aiAssistantToken 欄位中
+
+if (fs.existsSync(CONFIG_PATH)) {
+    try {
+        const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+        if (config.aiAssistantToken && config.aiAssistantToken !== "YOUR_AI_ASSISTANT_TOKEN_HERE") {
+            TOKEN = config.aiAssistantToken;
+        }
+    } catch (e) {
+        console.error('[Bridge] 載入 config.json 失敗:', e.message);
+    }
+}
+
+if (TOKEN === "YOUR_AI_ASSISTANT_TOKEN_HERE") {
+    console.error('[Bridge Fatal] 錯誤: 未在 config.json 中設定 aiAssistantToken！請先設定以利安全啟動。');
+    process.exit(1);
+}
+
 const INBOX_PATH = path.join(__dirname, 'telegram_inbox.txt');
 const OUTBOX_PATH = path.join(__dirname, 'telegram_outbox.txt');
 
