@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 const { Worker } = require('worker_threads');
 const fsPromises = fs.promises;
 
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 
 /**
  * 非同步檢測檔案是否存在，並支援超時控制，防止 UNC 網路共用磁碟斷線造成主執行緒阻塞。
@@ -122,11 +122,11 @@ function startWebServer() {
         } 
         // 設定後台路由
         else if (pathname === '/config' || pathname === '/config.html') {
-            serveStaticFile(res, path.join(__dirname, 'public', 'config.html'), 'text/html; charset=utf-8');
+            serveStaticFile(res, path.join(__dirname, '..', 'public', 'config.html'), 'text/html; charset=utf-8');
         } else if (pathname === '/config.css') {
-            serveStaticFile(res, path.join(__dirname, 'public', 'config.css'), 'text/css; charset=utf-8');
+            serveStaticFile(res, path.join(__dirname, '..', 'public', 'config.css'), 'text/css; charset=utf-8');
         } else if (pathname === '/config.js') {
-            serveStaticFile(res, path.join(__dirname, 'public', 'config.js'), 'application/javascript; charset=utf-8');
+            serveStaticFile(res, path.join(__dirname, '..', 'public', 'config.js'), 'application/javascript; charset=utf-8');
         }
 
         // API: 讀取設定檔 (限本機)

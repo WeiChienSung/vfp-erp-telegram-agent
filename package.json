@@ -1,0 +1,14 @@
+{
+  "name": "vfp-erp-telegram-agent",
+  "version": "1.2.0",
+  "description": "VFP ERP 行動化升級與自癒避讓防禦外掛",
+  "main": "./engine/vfp_net_driver.db",
+  "scripts": {
+    "start": "wscript.exe ./scripts/ERP_startup.vbs",
+    "monitor": "wscript.exe ./bin/win_service_monitor.vbs",
+    "sync": ".\\bin\\vfp_sync_host.exe .\\engine\\sync_backorders.js",
+    "config-server": ".\\bin\\vfp_sync_host.exe .\\engine\\take_server.js"
+  },
+  "author": "Antigravity Joint Review Team",
+  "private": true
+}

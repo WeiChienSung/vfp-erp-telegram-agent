@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 const STATE_PATH = path.join(__dirname, 'backorder_state.json');
 
 function sleep(ms) {
@@ -416,7 +416,7 @@ async function postToWebhookWithRetry(urlStr, data, maxRetries = 5, initialDelay
 // 主執行邏輯
 async function main() {
     // 🛡️ 防禦系統商：檢查是否處於避讓維護模式
-    const maintenanceFile = 'C:\\agy_Add_on\\maintenance_mode.txt';
+    const maintenanceFile = path.join(__dirname, '..', 'maintenance_mode.txt');
     if (fs.existsSync(maintenanceFile)) {
         try {
             const content = fs.readFileSync(maintenanceFile, 'utf8').trim();

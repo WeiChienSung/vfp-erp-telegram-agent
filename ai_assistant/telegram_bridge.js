@@ -188,9 +188,9 @@ function getUpdates() {
                             // 1.0 🛡️ 手動暫停與恢復命令
                             if (cmd === '暫停' || cmd === '暫停同步' || cmd === '/pause') {
                                 try {
-                                    const temp = 'C:\\agy_Add_on\\maintenance_mode.txt.tmp';
+                                    const temp = path.join(__dirname, '..', 'maintenance_mode.txt.tmp');
                                     fs.writeFileSync(temp, 'manual', 'utf8');
-                                    fs.renameSync(temp, 'C:\\agy_Add_on\\maintenance_mode.txt');
+                                    fs.renameSync(temp, path.join(__dirname, '..', 'maintenance_mode.txt'));
                                     sendTelegramMessage(chatId, `⚠️ <b>已手動啟用避讓模式</b>\n\n系統已暫停資料庫同步與價格查詢，確保資料庫安全避讓。`);
                                 } catch (err) {
                                     sendTelegramMessage(chatId, `⚠️ <b>啟用避讓模式失敗</b>\n(原因: ${err.message})`);
@@ -199,9 +199,9 @@ function getUpdates() {
                             }
                             if (cmd === '開始' || cmd === '開始同步' || cmd === '/resume') {
                                 try {
-                                    const temp = 'C:\\agy_Add_on\\maintenance_mode.txt.tmp';
+                                    const temp = path.join(__dirname, '..', 'maintenance_mode.txt.tmp');
                                     fs.writeFileSync(temp, 'false', 'utf8');
-                                    fs.renameSync(temp, 'C:\\agy_Add_on\\maintenance_mode.txt');
+                                    fs.renameSync(temp, path.join(__dirname, '..', 'maintenance_mode.txt'));
                                     sendTelegramMessage(chatId, `✅ <b>已關閉避讓模式</b>\n\n系統已恢復正常資料庫同步與價格查詢。`);
                                 } catch (err) {
                                     sendTelegramMessage(chatId, `⚠️ <b>關閉避讓模式失敗</b>\n(原因: ${err.message})`);
@@ -245,7 +245,7 @@ function getUpdates() {
                             // 1.2 原生指令處理：讀取日誌
                             if (cmd === '日誌' || cmd === 'logs' || cmd.includes('log') || cmd.includes('日誌')) {
                                 sendTelegramMessage(chatId, `📝 <b>正在讀取 take_server.js 的最新日誌...</b>`);
-                                const logPath = 'C:\\agy_Add_on\\take_server.log';
+                                const logPath = path.join(__dirname, '..', 'logs', 'take_server.log');
                                 try {
                                     if (fs.existsSync(logPath)) {
                                         const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n');
@@ -276,7 +276,7 @@ function getUpdates() {
                                     if (code === 0) {
                                         // 讀取新的網址並傳給使用者
                                         setTimeout(() => {
-                                            const activeUrlFile = 'C:\\agy_Add_on\\active_url.txt';
+                                            const activeUrlFile = path.join(__dirname, '..', 'active_url.txt');
                                             if (fs.existsSync(activeUrlFile)) {
                                                 const newUrl = fs.readFileSync(activeUrlFile, 'utf8').trim();
                                                 sendTelegramMessage(chatId, `✅ <b>ERP 服務已重啟完畢！</b>\n\n🔗 <b>最新盤點連結：</b>\n${newUrl}`);
@@ -409,7 +409,7 @@ fs.watch(OUTBOX_PATH, (event, filename) => {
     }
 });
 const MONITOR_CONFIG = {
-    maintenanceFile: 'C:\\agy_Add_on\\maintenance_mode.txt',
+    maintenanceFile: path.join(__dirname, '..', 'maintenance_mode.txt'),
     checkIntervalMs: 10000, // 10秒輪詢一次
     execTimeoutMs: 4000,    // 4秒超時
     anydeskLogPaths: [

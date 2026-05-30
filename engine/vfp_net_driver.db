@@ -44,7 +44,7 @@ let nasCheckInProgress = false;
 const { spawn } = require('child_process');
 const { detectStockChanges } = require('./zero_stock_alert.js');
 
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 const ACTIVE_URL_PATH = path.join(__dirname, '..', 'active_url.txt');
 const SNAPSHOT_PATH = path.join(__dirname, 'stock_snapshot.json');
 
@@ -1291,7 +1291,7 @@ class TelegramBotInstance {
         if (!this.pollingActive) return;
 
         // 🛡️ [深層睡眠] 檢查是否進入防禦維護模式 (AnyDesk/RDP 或手動暫停)
-        const maintenanceFile = 'C:\\agy_Add_on\\maintenance_mode.txt';
+        const maintenanceFile = path.join(__dirname, '..', 'maintenance_mode.txt');
         let isMaintenance = false;
         if (fs.existsSync(maintenanceFile)) {
             try {
@@ -1383,7 +1383,7 @@ class TelegramBotInstance {
 
     async processUpdate(update) {
         // 🛡️ 防禦系統商：檢查是否處於避讓維護模式
-        const maintenanceFile = 'C:\\agy_Add_on\\maintenance_mode.txt';
+        const maintenanceFile = path.join(__dirname, '..', 'maintenance_mode.txt');
         let isMaintenance = false;
         if (fs.existsSync(maintenanceFile)) {
             try {

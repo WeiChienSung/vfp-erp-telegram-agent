@@ -1,9 +1,23 @@
-config.json
-stock_snapshot.json
-active_url.txt
-*.log
-backorder_state.json
-ai_assistant/bridge_chats.json
-ai_assistant/bridge_state.json
-ai_assistant/telegram_inbox.txt
-ai_assistant/telegram_outbox.txt
+# 排除本地設定與避讓狀態
+/config.json
+/maintenance_mode.txt
+/active_url.txt
+
+# 排除執行檔與大體積用戶端安裝檔
+/bin/vfp_sync_host.exe
+/client_release/Add_on需安裝的程式/
+
+# 排除日誌與臨時緩衝目錄
+/logs/
+/temp/
+/edge_dev_profile/
+/tmp_trigger/
+
+# 排除系統狀態 JSON 檔
+/engine/backorder_state.json
+/engine/stock_snapshot.json
+/ai_assistant/bridge_chats.json
+/ai_assistant/bridge_state.json
+/ai_assistant/telegram_inbox.txt
+/ai_assistant/telegram_outbox.txt
+/ai_assistant/downloads/

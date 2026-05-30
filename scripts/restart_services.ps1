@@ -28,9 +28,9 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.
 Start-Sleep -Seconds 2
 
 # 3. Start Node services via wscript.exe wrappers to avoid Session 0 GUI restriction
-wscript.exe "C:\agy_Add_on\run_query.vbs"
-wscript.exe "C:\agy_Add_on\run_take.vbs"
-wscript.exe "C:\agy_Add_on\run_bridge.vbs"
+wscript.exe "$PSScriptRoot\run_query.vbs"
+wscript.exe "$PSScriptRoot\run_take.vbs"
+wscript.exe "$PSScriptRoot\run_bridge.vbs"
 
 Write-Output "Services restarted successfully (Query Bot, Local Config Server & AI Bridge)."
 
