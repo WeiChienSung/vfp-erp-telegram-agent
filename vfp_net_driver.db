@@ -156,6 +156,30 @@ function sleepSync(ms) {
     }
 }
 
+function getDisplayPrices(prodNo, rec) {
+    try {
+        const allRecords = getStockRecords(config.databasePath);
+        const cleanNo = normalizeText(prodNo).trim();
+        const found = allRecords.find(r => normalizeText(r.NO).trim() === cleanNo);
+        if (found) {
+            const price1 = found.SAPRI1 || 0;
+            const listPrice = found.SAPRIT || 0;
+            return {
+                price1: price1 > 0 ? `$${price1.toLocaleString()}` : '--',
+                listPrice: listPrice > 0 ? `$${listPrice.toLocaleString()}` : '--'
+            };
+        }
+    } catch (e) {
+        console.error('[價格對照錯誤]', e.message);
+    }
+    const histPrice1 = rec.TPRICE > 0 ? `$${rec.TPRICE.toLocaleString()}` : '--';
+    const histListPrice = rec.SAPRIT > 0 ? `$${rec.SAPRIT.toLocaleString()}` : '--';
+    return {
+        price1: histPrice1,
+        listPrice: histListPrice
+    };
+}
+
 // 全域商品資料快取
 let stockCache = {
     dbPath: '',
@@ -1443,9 +1467,8 @@ class TelegramBotInstance {
                             const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
                             const stopBadge = isStopped ? ' ⛔ <b>[已停售]</b>' : '';
                             
-                            const histPrice1 = rec.TPRICE > 0 ? `$${rec.TPRICE.toLocaleString()}` : '--';
-                            const histListPrice = rec.SAPRIT > 0 ? `$${rec.SAPRIT.toLocaleString()}` : '--';
-                            const priceSuffix = ` (售價1: ${histPrice1} / 牌價: ${histListPrice})`;
+                            const { price1, listPrice } = getDisplayPrices(prodNo, rec);
+                            const priceSuffix = ` (售價1: ${price1} / 牌價: ${listPrice})`;
                             
                             reply += `📅 <b>${dateStr}</b>${stopBadge}\n`;
                             reply += `🏢 客戶：<b>[${rec.NO}] ${rec.NAME.trim()}</b>\n`;
@@ -1776,9 +1799,8 @@ class TelegramBotInstance {
                             const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
                             const stopBadge = isStopped ? ' ⛔ <b>[已停售]</b>' : '';
                             
-                            const histPrice1 = rec.TPRICE > 0 ? `$${rec.TPRICE.toLocaleString()}` : '--';
-                            const histListPrice = rec.SAPRIT > 0 ? `$${rec.SAPRIT.toLocaleString()}` : '--';
-                            const priceSuffix = ` (售價1: ${histPrice1} / 牌價: ${histListPrice})`;
+                            const { price1, listPrice } = getDisplayPrices(rec.MNO, rec);
+                            const priceSuffix = ` (售價1: ${price1} / 牌價: ${listPrice})`;
                             
                             reply += `📅 <b>${dateStr}</b>${stopBadge}\n`;
                             reply += `🛒 品名：${rec.MNAME} (<code>${rec.MNO}</code>)\n`;
