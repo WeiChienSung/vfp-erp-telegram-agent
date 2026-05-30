@@ -1425,7 +1425,7 @@ class TelegramBotInstance {
                     }, {
                         reverse: true,
                         limit: 3,
-                        fieldsToExtract: ['ACC', 'DAT', 'NO', 'NAME', 'MNO', 'MNAME', 'QUT', 'UNIT', 'PRICE', 'TOT']
+                        fieldsToExtract: ['ACC', 'DAT', 'NO', 'NAME', 'MNO', 'MNAME', 'QUT', 'UNIT', 'PRICE', 'TPRICE', 'SAPRIT', 'TOT']
                     });
                     
                     let reply = `🔍 <b>商品歷史銷貨紀錄（最新 3 筆）：</b>\n`;
@@ -1443,10 +1443,14 @@ class TelegramBotInstance {
                             const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
                             const stopBadge = isStopped ? ' ⛔ <b>[已停售]</b>' : '';
                             
+                            const histPrice1 = rec.TPRICE > 0 ? `$${rec.TPRICE.toLocaleString()}` : '--';
+                            const histListPrice = rec.SAPRIT > 0 ? `$${rec.SAPRIT.toLocaleString()}` : '--';
+                            const priceSuffix = ` (售價1: ${histPrice1} / 牌價: ${histListPrice})`;
+                            
                             reply += `📅 <b>${dateStr}</b>${stopBadge}\n`;
                             reply += `🏢 客戶：<b>[${rec.NO}] ${rec.NAME.trim()}</b>\n`;
                             reply += `📊 數量：<b>${rec.QUT}</b> ${rec.UNIT.trim()}\n`;
-                            reply += `💵 單價：<b>$${rec.PRICE.toLocaleString()}</b>\n`;
+                            reply += `💵 單價：<b>$${rec.PRICE.toLocaleString()}</b>${priceSuffix}\n`;
                             reply += `💰 小計：$${rec.TOT.toLocaleString()}\n\n`;
                             if (idx < history.length - 1) {
                                 reply += `-----------------------------------\n\n`;
@@ -1753,7 +1757,7 @@ class TelegramBotInstance {
                     }, {
                         reverse: true,
                         limit: 3,
-                        fieldsToExtract: ['ACC', 'DAT', 'NO', 'NAME', 'MNO', 'MNAME', 'QUT', 'UNIT', 'PRICE', 'TOT']
+                        fieldsToExtract: ['ACC', 'DAT', 'NO', 'NAME', 'MNO', 'MNAME', 'QUT', 'UNIT', 'PRICE', 'TPRICE', 'SAPRIT', 'TOT']
                     });
                     
                     let reply = `🔍 <b>客戶專屬歷史售價查詢結果</b>\n`;
@@ -1772,10 +1776,14 @@ class TelegramBotInstance {
                             const isStopped = nameStr.includes('停產') || nameStr.includes('停用') || nameStr.includes('停售');
                             const stopBadge = isStopped ? ' ⛔ <b>[已停售]</b>' : '';
                             
+                            const histPrice1 = rec.TPRICE > 0 ? `$${rec.TPRICE.toLocaleString()}` : '--';
+                            const histListPrice = rec.SAPRIT > 0 ? `$${rec.SAPRIT.toLocaleString()}` : '--';
+                            const priceSuffix = ` (售價1: ${histPrice1} / 牌價: ${histListPrice})`;
+                            
                             reply += `📅 <b>${dateStr}</b>${stopBadge}\n`;
                             reply += `🛒 品名：${rec.MNAME} (<code>${rec.MNO}</code>)\n`;
                             reply += `📊 數量：<b>${rec.QUT}</b> ${rec.UNIT.trim()}\n`;
-                            reply += `💵 單價：<b>$${rec.PRICE.toLocaleString()}</b>\n`;
+                            reply += `💵 單價：<b>$${rec.PRICE.toLocaleString()}</b>${priceSuffix}\n`;
                             reply += `💰 小計：$${rec.TOT.toLocaleString()}\n\n`;
                             if (idx < history.length - 1) {
                                 reply += `-----------------------------------\n\n`;
