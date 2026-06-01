@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📋 行動掃碼盤點助手</title>
+    <!-- Google Fonts Outfit & Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- Dexie.js (IndexedDB wrapper) and html5-qrcode -->
+    <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --surface-color: rgba(22, 27, 34, 0.7);
+            --card-color: rgba(33, 38, 45, 0.5);
+            --border-color: rgba(48, 54, 61, 0.7);
+            --primary-color: #58a6ff;
+            --success-color: #2ea44f;
+            --warning-color: #d29922;
+            --danger-color: #f85149;
+            --text-color: #c9d1d9;
+            --text-bright: #f0f6fc;
+            --text-muted: #8b949e;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 16px;
+            box-sizing: border-box;
+            min-height: 100vh;
+        }
+
+        /* 頂部狀態列 */
+        .header-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .header-bar h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.4rem;
+            margin: 0;
+            color: var(--text-bright);
+            font-weight: 700;
+        }
+
+        .network-badge {
+            padding: 6px 12px;
+            border-radius: 50px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+        }
+
+        .network-badge.online {
+            color: #56d364;
+            border-color: rgba(86, 211, 100, 0.3);
+            background-color: rgba(86, 211, 100, 0.05);
+        }
+
+        .network-badge.offline {
+            color: var(--warning-color);
+            border-color: rgba(210, 153, 34, 0.3);
+            background-color: rgba(210, 153, 34, 0.05);
+        }
+
+        /* 區塊面板樣式 */
+        .glass-card {
+            background-color: var(--surface-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+        }
+
+        .card-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-bright);
+            margin-top: 0;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* 表單元素 */
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .form-group {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-group label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .form-control {
+            background-color: #090d13;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-bright);
+            padding: 10px;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .form-control:focus {
+            border-color: var(--primary-color);
+        }
+
+        /* 嵌入式掃描器覆蓋 */
+        #embedded-scanner {
+            width: 100%;
+            height: 220px;
+            border-radius: 8px;
+            overflow: hidden;
+            background-color: #000;
+            margin-bottom: 12px;
+            border: 1px solid var(--border-color);
+            position: relative;
+            display: none;
+        }
+
+        #reader {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        #reader video {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+        }
+
+        /* 雷射線與覆蓋層 */
+        .scan-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2;
+        }
+
+        .scan-box {
+            width: 200px;
+            height: 120px;
+            border: 2px solid var(--primary-color);
+            border-radius: 8px;
+            box-shadow: 0 0 10px var(--primary-color), 0 0 0 9999px rgba(0, 0, 0, 0.5);
+            position: relative;
+        }
+
+        .scan-box::after {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 2px;
+            background-color: var(--primary-color);
+            left: 0;
+            animation: laser-sweep 2s infinite linear;
+            box-shadow: 0 0 8px var(--primary-color);
+        }
+
+        @keyframes laser-sweep {
+            0% { top: 5%; }
+            50% { top: 95%; }
+            100% { top: 5%; }
+        }
+
+        /* 手動條碼輸入與即時盤點 */
+        .scanned-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        /* 按鈕組 */
+        .btn-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 12px;
+            border-radius: 6px;
+            border: none;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: opacity 0.2s;
+        }
+
+        .btn:active {
+            opacity: 0.85;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: #0d1117;
+        }
+
+        .btn-success {
+            background-color: var(--success-color);
+            color: var(--text-bright);
+        }
+
+        .btn-outline {
+            background-color: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+        }
+
+        /* 列表項目 */
+        .item-list {
+            margin-top: 10px;
+            max-height: 250px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .item-card {
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .item-details {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .item-barcode {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+            color: var(--text-bright);
+            font-size: 0.95rem;
+        }
+
+        .item-time {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .item-status {
+            font-size: 0.75rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .item-status.pending {
+            background-color: rgba(210, 153, 34, 0.15);
+            color: var(--warning-color);
+            border: 1px solid rgba(210, 153, 34, 0.3);
+        }
+
+        .item-status.synced {
+            background-color: rgba(86, 211, 100, 0.15);
+            color: #56d364;
+            border: 1px solid rgba(86, 211, 100, 0.3);
+        }
+
+        .item-qty-badge {
+            background-color: var(--border-color);
+            color: var(--text-bright);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        /* 覆蓋/累加設定選項 */
+        .option-group {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.85rem;
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(48,54,61,0.5);
+        }
+
+        .option-group:last-child {
+            border-bottom: none;
+        }
+
+        /* 彈出警告框樣式 */
+        .modal {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            display: none;
+        }
+
+        .modal-content {
+            width: 85%;
+            max-width: 320px;
+            background-color: #161b22;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 25px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+
+        .modal-content h3 {
+            margin-top: 0;
+            color: var(--text-bright);
+            font-family: 'Outfit', sans-serif;
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 頂部狀態列 -->
+    <div class="header-bar">
+        <h1>📋 庫存盤點作業</h1>
+        <div class="network-badge online" id="network-badge">🟢 在線模式</div>
+    </div>
+
+    <!-- 1. 盤點作業基本資訊 -->
+    <div class="glass-card">
+        <h2 class="card-title">🏢 盤點資訊配置</h2>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="take-no">盤點單號</label>
+                <input type="text" id="take-no" class="form-control" placeholder="例: TK20260530">
+            </div>
+            <div class="form-group">
+                <label for="user-code">盤點人員代碼</label>
+                <input type="text" id="user-code" class="form-control" placeholder="例: User01">
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. 行動掃描與輸入區 -->
+    <div class="glass-card">
+        <h2 class="card-title">📷 掃描與條碼輸入</h2>
+        
+        <!-- 嵌入式相機節點 -->
+        <div id="embedded-scanner">
+            <div id="reader"></div>
+            <div class="scan-overlay">
+                <div class="scan-box"></div>
+            </div>
+        </div>
+
+        <div class="scanned-info">
+            <div class="form-group" style="flex: 2;">
+                <label for="barcode-input">商品條碼</label>
+                <input type="text" id="barcode-input" class="form-control" placeholder="請掃碼或手動輸入品項">
+            </div>
+            <div class="form-group" style="flex: 1;">
+                <label for="qty-input">盤點數量</label>
+                <input type="number" id="qty-input" class="form-control" value="1" min="1">
+            </div>
+        </div>
+
+        <div class="btn-group">
+            <button class="btn btn-outline" id="scan-trigger-btn" onclick="toggleEmbeddedScanner()">📷 開啟相機</button>
+            <button class="btn btn-primary" onclick="handleAddScannedItem()">💾 儲存本機</button>
+        </div>
+    </div>
+
+    <!-- 3. 本地快取清單與同步 -->
+    <div class="glass-card">
+        <h2 class="card-title" style="justify-content: space-between;">
+            <span>📋 本機待同步列表</span>
+            <span style="font-size: 0.8rem; color: var(--text-muted);" id="queue-count">共計 0 筆</span>
+        </h2>
+        
+        <div class="item-list" id="item-list">
+            <!-- 動態注入本地盤點明細 -->
+        </div>
+
+        <div class="btn-group" style="margin-top: 15px;">
+            <button class="btn btn-outline" onclick="clearAllCache()" style="border-color: rgba(248,81,73,0.3); color: var(--danger-color);">🧹 清空本機</button>
+            <button class="btn btn-success" id="sync-btn" onclick="syncPendingData()">☁️ 一鍵同步上傳</button>
+        </div>
+    </div>
+
+    <!-- 4. 重複掃描與進階配置 -->
+    <div class="glass-card">
+        <h2 class="card-title">⚙️ 盤點規則設定</h2>
+        <div class="option-group">
+            <span>重複掃描衝突規則 (Option 1C)</span>
+            <select id="mode-select" class="form-control" style="padding: 4px 10px; font-size: 0.8rem;" onchange="saveSettings()">
+                <option value="add">🟢 重複時自動累加</option>
+                <option value="overwrite">🔵 重複時覆蓋數量</option>
+                <option value="warn">🟡 重複時警告提示</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- 重複掃描確認 Modal -->
+    <div class="modal" id="duplicate-modal">
+        <div class="modal-content">
+            <h3>⚠️ 重複掃描提示</h3>
+            <p id="modal-text">商品已存在於此盤點單中，您希望如何處置？</p>
+            <div class="modal-buttons">
+                <button class="btn btn-outline" onclick="handleDuplicateChoice('cancel')">取消</button>
+                <button class="btn btn-outline" onclick="handleDuplicateChoice('overwrite')" style="color: var(--primary-color); border-color: rgba(88,166,255,0.3);">覆蓋</button>
+                <button class="btn btn-primary" onclick="handleDuplicateChoice('add')">累加</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 1. 初始化 Dexie IndexedDB 本地快取庫
+        const db = new Dexie("InventoryCacheDB");
+        db.version(1).stores({
+            // id: 自增主鍵
+            // takeNo: 盤點單號
+            // barcode: 商品條碼
+            // qty: 盤點數量
+            // syncStatus: 'pending' (待同步) | 'synced' (已同步)
+            records: '++id, takeNo, barcode, qty, timestamp, syncStatus'
+        });
+
+        let html5QrCode = null;
+        let isScannerOpen = false;
+        let activeToken = '';
+
+        // Modal 流程控制變數
+        let pendingItem = null;
+
+        // Telegram Haptics 觸覺震動
+        const Haptics = {
+            success() { if (window.Telegram?.WebApp?.HapticFeedback) Telegram.WebApp.HapticFeedback.notificationOccurred('success'); },
+            warning() { if (window.Telegram?.WebApp?.HapticFeedback) Telegram.WebApp.HapticFeedback.notificationOccurred('warning'); },
+            error() { if (window.Telegram?.WebApp?.HapticFeedback) Telegram.WebApp.HapticFeedback.notificationOccurred('error'); }
+        };
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // A. 初始化 Telegram WebApp
+            if (window.Telegram && window.Telegram.WebApp) {
+                Telegram.WebApp.ready();
+                Telegram.WebApp.expand();
+            }
+
+            // B. 取得並快取 API Token (從 URL 取得 ?token=xxx，或使用 sessionStorage)
+            const urlParams = new URLSearchParams(window.location.search);
+            const token = urlParams.get('token');
+            if (token) {
+                sessionStorage.setItem('x-api-token', token);
+                activeToken = token;
+            } else {
+                activeToken = sessionStorage.getItem('x-api-token') || '';
+            }
+
+            // C. 載入先前輸入的盤點單號與人員代碼 (localStorage)
+            document.getElementById('take-no').value = localStorage.getItem('take-no') || '';
+            document.getElementById('user-code').value = localStorage.getItem('user-code') || '';
+            document.getElementById('mode-select').value = localStorage.getItem('mode-select') || 'add';
+
+            // D. 監聽網路連線狀態
+            updateOnlineStatus();
+            window.addEventListener('online', updateOnlineStatus);
+            window.addEventListener('offline', updateOnlineStatus);
+
+            // E. 持久化硬碟儲存要求
+            requestStoragePersistence();
+
+            // F. 載入列表
+            refreshItemList();
+        });
+
+        // 網路在線狀態監聽
+        function updateOnlineStatus() {
+            const isOnline = navigator.onLine;
+            const badge = document.getElementById('network-badge');
+            if (isOnline) {
+                badge.innerText = "🟢 在線模式";
+                badge.className = "network-badge online";
+                // 在線時，嘗試背景與伺服器鎖定狀態進行對齊，如果有未傳的背景嘗試批次同步
+                checkServerLockAndAutoSync();
+            } else {
+                badge.innerText = "🔴 離線暫存中";
+                badge.className = "network-badge offline";
+            }
+        }
+
+        function requestStoragePersistence() {
+            if (navigator.storage && navigator.storage.persist) {
+                navigator.storage.persist().then(granted => {
+                    if (granted) console.log("儲存空間已取得持久化保障，防範瀏覽器自動清理。");
+                });
+            }
+        }
+
+        // 保存表單設定
+        function saveSettings() {
+            const takeNo = document.getElementById('take-no').value;
+            const userCode = document.getElementById('user-code').value;
+            const mode = document.getElementById('mode-select').value;
+            
+            localStorage.setItem('take-no', takeNo);
+            localStorage.setItem('user-code', userCode);
+            localStorage.setItem('mode-select', mode);
+        }
+
+        // 刷新列表顯示
+        async function refreshItemList() {
+            saveSettings();
+            const takeNo = document.getElementById('take-no').value || '';
+            
+            // 從 IndexedDB 撈出該盤點單的所有紀錄 (按時間降序)
+            const list = await db.records.where('takeNo').equals(takeNo).reverse().sortBy('timestamp');
+            
+            const listEl = document.getElementById('item-list');
+            listEl.innerHTML = '';
+            
+            let pendingCount = 0;
+            list.forEach(item => {
+                if (item.syncStatus === 'pending') pendingCount++;
+                
+                const timeStr = new Date(item.timestamp).toLocaleTimeString();
+                const card = document.createElement('div');
+                card.className = 'item-card';
+                card.innerHTML = `
+                    <div class="item-details">
+                        <span class="item-barcode">${item.barcode}</span>
+                        <span class="item-time">掃描時間 ${timeStr}</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span class="item-status ${item.syncStatus}">
+                            ${item.syncStatus === 'pending' ? '⏳ 待上傳' : '✅ 已同步'}
+                        </span>
+                        <span class="item-qty-badge">${item.qty}</span>
+                    </div>
+                `;
+                listEl.appendChild(card);
+            });
+
+            document.getElementById('queue-count').innerText = `共計 ${list.length} 筆 (待上傳: ${pendingCount} 筆)`;
+        }
+
+        // 2. 嵌入式相機掃描控制
+        function toggleEmbeddedScanner() {
+            const container = document.getElementById('embedded-scanner');
+            const btn = document.getElementById('scan-trigger-btn');
+            
+            if (isScannerOpen) {
+                stopScanner();
+                container.style.display = 'none';
+                btn.innerText = "📷 開啟相機";
+            } else {
+                container.style.display = 'block';
+                btn.innerText = "🔇 關閉相機";
+                startScanner();
+            }
+        }
+
+        function startScanner() {
+            html5QrCode = new Html5Qrcode("reader");
+            const config = {
+                fps: 15,
+                qrbox: { width: 200, height: 120 },
+                aspectRatio: 1.0
+            };
+            
+            html5QrCode.start(
+                { facingMode: "environment" }, 
+                config,
+                (text) => {
+                    Haptics.success();
+                    document.getElementById('barcode-input').value = text;
+                    stopScanner();
+                    document.getElementById('embedded-scanner').style.display = 'none';
+                    document.getElementById('scan-trigger-btn').innerText = "📷 開啟相機";
+                },
+                () => {} // 忽略匹配錯誤
+            ).catch(err => {
+                console.error(err);
+                alert("相機開啟失敗，請確認網頁以 HTTPS 載入或已允許相機權限。");
+            });
+            
+            isScannerOpen = true;
+        }
+
+        function stopScanner() {
+            if (html5QrCode) {
+                html5QrCode.stop().then(() => {
+                    html5QrCode = null;
+                }).catch(e => console.error(e));
+            }
+            isScannerOpen = false;
+        }
+
+        // 3. 儲存盤點至本地本機快取 (Dexie)
+        async function handleAddScannedItem() {
+            const takeNo = document.getElementById('take-no').value.trim();
+            const userCode = document.getElementById('user-code').value.trim();
+            const barcode = document.getElementById('barcode-input').value.trim();
+            const qty = parseFloat(document.getElementById('qty-input').value) || 1;
+            const mode = document.getElementById('mode-select').value;
+
+            if (!takeNo || !userCode || !barcode) {
+                Haptics.error();
+                alert("請先填寫『盤點單號』、『盤點人員代碼』並『輸入商品條碼』！");
+                return;
+            }
+
+            // 🔍 檢查本地快取庫中是否已有該商品
+            const existing = await db.records
+                .where('[takeNo+barcode]')
+                .equals([takeNo, barcode])
+                .first();
+
+            if (existing) {
+                if (mode === 'warn') {
+                    // 🟡 警告模式：跳出 Modal
+                    pendingItem = { id: existing.id, takeNo, userCode, barcode, qty };
+                    document.getElementById('modal-text').innerText = `商品條碼 [${barcode}] 於單號中已存在數量 ${existing.qty}，您希望累加還是覆蓋？`;
+                    document.getElementById('duplicate-modal').style.display = 'flex';
+                    Haptics.warning();
+                    return;
+                } else if (mode === 'add') {
+                    // 累加
+                    await db.records.update(existing.id, {
+                        qty: existing.qty + qty,
+                        timestamp: Date.now(),
+                        syncStatus: 'pending' // 重設為待同步
+                    });
+                } else if (mode === 'overwrite') {
+                    // 覆蓋
+                    await db.records.update(existing.id, {
+                        qty: qty,
+                        timestamp: Date.now(),
+                        syncStatus: 'pending'
+                    });
+                }
+            } else {
+                // 新增
+                await db.records.add({
+                    takeNo,
+                    barcode,
+                    qty,
+                    timestamp: Date.now(),
+                    syncStatus: 'pending'
+                });
+            }
+
+            // 清空條碼輸入，數量重置為 1，刷新顯示
+            document.getElementById('barcode-input').value = '';
+            document.getElementById('qty-input').value = '1';
+            Haptics.success();
+            refreshItemList();
+        }
+
+        // 警告彈出框處置
+        async function handleDuplicateChoice(choice) {
+            document.getElementById('duplicate-modal').style.display = 'none';
+            if (!pendingItem) return;
+
+            const existing = await db.records.get(pendingItem.id);
+            if (!existing) return;
+
+            if (choice === 'add') {
+                await db.records.update(existing.id, {
+                    qty: existing.qty + pendingItem.qty,
+                    timestamp: Date.now(),
+                    syncStatus: 'pending'
+                });
+            } else if (choice === 'overwrite') {
+                await db.records.update(existing.id, {
+                    qty: pendingItem.qty,
+                    timestamp: Date.now(),
+                    syncStatus: 'pending'
+                });
+            }
+
+            pendingItem = null;
+            document.getElementById('barcode-input').value = '';
+            document.getElementById('qty-input').value = '1';
+            Haptics.success();
+            refreshItemList();
+        }
+
+        // 🧹 清空本機暫存
+        async function clearAllCache() {
+            saveSettings();
+            const takeNo = document.getElementById('take-no').value || '';
+            if (confirm(`確定要完全清空本機上屬於單號 [${takeNo}] 的所有未同步/已同步資料嗎？`)) {
+                await db.records.where('takeNo').equals(takeNo).delete();
+                refreshItemList();
+            }
+        }
+
+        // 4. 一鍵批次同步上傳 (Option 3B: 伺服器端緩衝池)
+        async function syncPendingData() {
+            saveSettings();
+            const takeNo = document.getElementById('take-no').value.trim();
+            const userCode = document.getElementById('user-code').value.trim();
+
+            if (!takeNo || !userCode) {
+                alert("請填寫單號與人員代碼再執行同步。");
+                return;
+            }
+
+            // 抓出所有狀態為 'pending' 的紀錄
+            const pendingList = await db.records
+                .where('takeNo').equals(takeNo)
+                .and(r => r.syncStatus === 'pending')
+                .toArray();
+
+            if (pendingList.length === 0) {
+                alert("目前本機沒有待上傳同步的明細。");
+                return;
+            }
+
+            const syncBtn = document.getElementById('sync-btn');
+            syncBtn.disabled = true;
+            syncBtn.innerText = "⏳ 正在批次同步...";
+
+            let successCount = 0;
+            let queuedCount = 0;
+            let failCount = 0;
+
+            for (const item of pendingList) {
+                try {
+                    const payload = {
+                        takeNo: item.takeNo,
+                        userCode: userCode,
+                        barcode: item.barcode,
+                        qty: item.qty,
+                        mode: 'overwrite' // 因本地已經完成累加/警告處理，伺服器一律採取 overwrite
+                    };
+
+                    const response = await fetch('/api/take/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-api-token': activeToken
+                        },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    const resJson = await response.json();
+                    if (resJson.success) {
+                        if (resJson.queued) {
+                            // 伺服器忙碌已寫入暫存 (3B) ➔ 本地亦標示同步完成，但伺服器背景稍後會寫入 VFP
+                            queuedCount++;
+                        } else {
+                            successCount++;
+                        }
+                        
+                        // 更新本地 IndexedDB 狀態為已同步
+                        await db.records.update(item.id, { syncStatus: 'synced' });
+                    } else {
+                        failCount++;
+                    }
+
+                } catch (e) {
+                    console.error("同步單筆明細出錯:", e.message);
+                    failCount++;
+                }
+            }
+
+            syncBtn.disabled = false;
+            syncBtn.innerText = "☁️ 一鍵同步上傳";
+            refreshItemList();
+
+            if (failCount > 0) {
+                Haptics.error();
+                alert(`同步完成，但有部分失敗。成功: ${successCount} 筆, 伺服器暫存: ${queuedCount} 筆, 失敗: ${failCount} 筆。\n\n提示: 失敗的項目仍會安全保存在本機，可於連線良好時再次點選同步。`);
+            } else {
+                Haptics.success();
+                if (queuedCount > 0) {
+                    alert(`☁️ 伺服器端排程緩衝同步！\n\n成功上傳 ${queuedCount + successCount} 筆項目！\n\n[系統避讓提示]：偵測到目前核心 ERP 正在進行備份維護，盤點資料已先儲存在伺服器暫存隊列，系統將於背景解鎖後自動補寫入 VFP 資料庫。`);
+                } else {
+                    alert(`🟢 批次同步完成！\n\n共計 ${successCount} 筆明細已順利寫入 VFP 資料庫！`);
+                }
+            }
+        }
+
+        // 自動上傳
+        async function checkServerLockAndAutoSync() {
+            // 背景自動上傳邏輯，若網路接通自動做一次檢測
+            try {
+                const response = await fetch('/api/take/status');
+                if (response.ok) {
+                    const status = await response.json();
+                    console.log(`[避讓雷達] 偵測伺服器目前狀態：${status.isLocked ? '🔒 鎖定避讓中' : '🟢 暢通'}`);
+                }
+            } catch(e) {}
+        }
+    </script>
+</body>
+</html>

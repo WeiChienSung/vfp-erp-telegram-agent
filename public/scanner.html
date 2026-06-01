@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>📷 商品相機條碼掃描器</title>
+    <!-- Google Fonts Outfit & Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <!-- Dexie.js for IndexedDB and html5-qrcode -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --surface-color: rgba(22, 27, 34, 0.8);
+            --border-color: rgba(48, 54, 61, 0.8);
+            --primary-color: #00E676;
+            --primary-glow: rgba(0, 230, 118, 0.4);
+            --text-color: #f0f6fc;
+            --text-muted: #8b949e;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        header {
+            width: 100%;
+            padding: 16px 0;
+            background: linear-gradient(180deg, rgba(13,17,23,0.9) 0%, rgba(13,17,23,0) 100%);
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 10;
+            text-align: center;
+        }
+
+        header h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.2rem;
+            margin: 0;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        header p {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin: 4px 0 0 0;
+        }
+
+        /* 掃描容器 */
+        #scanner-container {
+            width: 100%;
+            height: 100vh;
+            position: relative;
+            background-color: #000;
+        }
+
+        /* html5-qrcode 內部 video 覆蓋滿版 */
+        #reader {
+            width: 100% !important;
+            height: 100% !important;
+            border: none !important;
+        }
+
+        #reader video {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+        }
+
+        /* 霓虹雷射光線動畫與高亮中心框 */
+        .scan-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 5;
+        }
+
+        /* 覆蓋四周的半透明黑罩，僅留中央 65% 寬度挖空 */
+        .scan-mask {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.6);
+        }
+
+        /* 高亮掃描框 */
+        .scan-box {
+            width: 260px;
+            height: 160px;
+            position: relative;
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); /* CSS 挖空法 */
+            transition: border-color 0.3s ease;
+        }
+
+        .scan-box.active {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 15px var(--primary-glow), 0 0 0 9999px rgba(0, 0, 0, 0.6);
+        }
+
+        /* 雷射線掃描動畫 */
+        .scan-box::after {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, var(--primary-color), transparent);
+            left: 0;
+            animation: laser-sweep 2.2s infinite linear;
+            box-shadow: 0 0 8px var(--primary-color);
+        }
+
+        @keyframes laser-sweep {
+            0% { top: 5%; }
+            50% { top: 95%; }
+            100% { top: 5%; }
+        }
+
+        /* 框角高亮線條 */
+        .corner {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border: 3px solid transparent;
+        }
+        .top-left {
+            top: -2px; left: -2px;
+            border-top-color: var(--primary-color);
+            border-left-color: var(--primary-color);
+            border-top-left-radius: 8px;
+        }
+        .top-right {
+            top: -2px; right: -2px;
+            border-top-color: var(--primary-color);
+            border-right-color: var(--primary-color);
+            border-top-right-radius: 8px;
+        }
+        .bottom-left {
+            bottom: -2px; left: -2px;
+            border-bottom-color: var(--primary-color);
+            border-left-color: var(--primary-color);
+            border-bottom-left-radius: 8px;
+        }
+        .bottom-right {
+            bottom: -2px; right: -2px;
+            border-bottom-color: var(--primary-color);
+            border-right-color: var(--primary-color);
+            border-bottom-right-radius: 8px;
+        }
+
+        /* 控制按鈕區 */
+        .controls {
+            position: absolute;
+            bottom: 40px;
+            left: 0;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            z-index: 10;
+        }
+
+        .btn {
+            background: var(--surface-color);
+            border: 1px solid var(--border-color);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: var(--text-color);
+            padding: 12px 24px;
+            border-radius: 50px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: all 0.2s ease;
+        }
+
+        .btn:active {
+            transform: scale(0.95);
+            background: var(--border-color);
+        }
+
+        #torch-btn {
+            display: none; /* 有手電筒能力時動態開啟 */
+        }
+
+        .torch-active {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+            box-shadow: 0 0 10px var(--primary-glow);
+        }
+        
+        #error-message {
+            position: absolute;
+            top: 50%;
+            left: 5%;
+            width: 90%;
+            text-align: center;
+            background: rgba(239, 83, 80, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            color: white;
+            display: none;
+            z-index: 15;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>📷 商品條碼快速查詢</h1>
+        <p>請將商品條碼置於中心綠框內</p>
+    </header>
+
+    <div id="error-message"></div>
+
+    <div id="scanner-container">
+        <!-- html5-qrcode 嵌入節點 -->
+        <div id="reader"></div>
+        
+        <!-- 掃描中心框與霓虹掃描線 -->
+        <div class="scan-overlay">
+            <div class="scan-box active" id="scan-box">
+                <div class="corner top-left"></div>
+                <div class="corner top-right"></div>
+                <div class="corner bottom-left"></div>
+                <div class="corner bottom-right"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn" id="torch-btn" onclick="toggleTorch()">
+            💡 <span>開啟閃光燈</span>
+        </button>
+        <button class="btn" onclick="closeScanner()">
+            ❌ <span>關閉</span>
+        </button>
+    </div>
+
+    <script>
+        let html5QrCode = null;
+        let videoTrack = null;
+        let isTorchOn = false;
+
+        // Telegram Haptic 反饋封裝
+        const Haptics = {
+            success() {
+                if (window.Telegram?.WebApp?.HapticFeedback) {
+                    Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+                }
+            },
+            warning() {
+                if (window.Telegram?.WebApp?.HapticFeedback) {
+                    Telegram.WebApp.HapticFeedback.notificationOccurred('warning');
+                }
+            },
+            error() {
+                if (window.Telegram?.WebApp?.HapticFeedback) {
+                    Telegram.WebApp.HapticFeedback.notificationOccurred('error');
+                }
+            }
+        };
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // 初始化 Telegram WebApp
+            if (window.Telegram && window.Telegram.WebApp) {
+                Telegram.WebApp.ready();
+                Telegram.WebApp.expand();
+            }
+
+            startScanning();
+        });
+
+        function showError(msg) {
+            const el = document.getElementById('error-message');
+            el.innerText = msg;
+            el.style.display = 'block';
+            Haptics.error();
+        }
+
+        function startScanning() {
+            html5QrCode = new Html5Qrcode("reader");
+            
+            const config = {
+                fps: 15,
+                qrbox: { width: 260, height: 160 },
+                aspectRatio: 1.0
+            };
+
+            html5QrCode.start(
+                { facingMode: "environment" }, 
+                config,
+                onScanSuccess,
+                onScanFailure
+            )
+            .then(initTorchControl)
+            .catch(err => {
+                console.error("無法開啟相機:", err);
+                showError("無法連線至手機相機，請確認已授予相機瀏覽器權限。");
+            });
+        }
+
+        function onScanSuccess(decodedText, decodedResult) {
+            Haptics.success();
+            document.getElementById('scan-box').classList.remove('active');
+            
+            // 停止掃描
+            if (html5QrCode) {
+                html5QrCode.stop().then(() => {
+                    // 將解碼的條碼發送回 Telegram Bot 並自動關閉 WebApp 視窗
+                    if (window.Telegram && window.Telegram.WebApp) {
+                        Telegram.WebApp.sendData(decodedText);
+                    } else {
+                        alert(`掃描成功 (非TMA模式): ${decodedText}`);
+                    }
+                }).catch(err => {
+                    console.error("停止相機失敗", err);
+                });
+            }
+        }
+
+        function onScanFailure(error) {
+            // 掃描中無匹配，靜默忽略即可
+        }
+
+        // 偵測並初始化手電筒按鈕
+        function initTorchControl() {
+            setTimeout(() => {
+                try {
+                    const videoEl = document.querySelector('#reader video');
+                    if (videoEl && videoEl.srcObject) {
+                        videoTrack = videoEl.srcObject.getVideoTracks()[0];
+                        const capabilities = videoTrack.getCapabilities();
+                        if (capabilities.torch) {
+                            document.getElementById('torch-btn').style.display = 'flex';
+                        }
+                    }
+                } catch (e) {
+                    console.log("不支援 WebRTC 閃光燈或未取得 capabilities:", e.message);
+                }
+            }, 1000);
+        }
+
+        // 閃光燈開關
+        function toggleTorch() {
+            if (!videoTrack) return;
+            
+            isTorchOn = !isTorchOn;
+            videoTrack.applyConstraints({
+                advanced: [{ torch: isTorchOn }]
+            })
+            .then(() => {
+                const btn = document.getElementById('torch-btn');
+                const span = btn.querySelector('span');
+                if (isTorchOn) {
+                    btn.classList.add('torch-active');
+                    span.innerText = "關閉閃光燈";
+                } else {
+                    btn.classList.remove('torch-active');
+                    span.innerText = "開啟閃光燈";
+                }
+            })
+            .catch(err => {
+                console.error("開關閃光燈失敗:", err);
+                isTorchOn = !isTorchOn; // 還原狀態
+            });
+        }
+
+        function closeScanner() {
+            if (html5QrCode) {
+                html5QrCode.stop().then(() => {
+                    if (window.Telegram && window.Telegram.WebApp) {
+                        Telegram.WebApp.close();
+                    }
+                }).catch(() => {
+                    if (window.Telegram && window.Telegram.WebApp) {
+                        Telegram.WebApp.close();
+                    }
+                });
+            } else {
+                if (window.Telegram && window.Telegram.WebApp) {
+                    Telegram.WebApp.close();
+                }
+            }
+        }
+    </script>
+</body>
+</html>

@@ -31,9 +31,11 @@ console.warn = function (...args) {
 
 process.on('uncaughtException', (err) => {
     console.error('[系統崩潰防禦] 未捕獲的異常 (已遮蔽 Token):', err);
+    process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
     console.error('[系統崩潰防禦] 未處理的 Promise 拒絕 (已遮蔽 Token):', reason);
+    process.exit(1);
 });
 
 // 🛡️ 背景雷達避讓狀態變數
@@ -145,11 +147,23 @@ function normalizeText(str) {
         .replace(/尺/g, '呎');
 }
 
+function updateMaintenanceStatus() {
+    const maintenanceFile = path.join(__dirname, '..', 'maintenance_mode.txt');
+    let isMaintenance = false;
+    if (fs.existsSync(maintenanceFile)) {
+        try {
+            const content = fs.readFileSync(maintenanceFile, 'utf8').trim();
+            isMaintenance = (content === 'manual' || content === 'remote' || content === 'true');
+        } catch(e) {}
+    }
+    isDbLocked = isMaintenance;
+    return isMaintenance;
+}
+
 function sleepSync(ms) {
     try {
-        const sab = new SharedArrayBuffer(4);
-        const int32 = new Int32Array(sab);
-        Atomics.wait(int32, 0, 0, ms);
+        const { execSync } = require('child_process');
+        execSync(`ping 127.0.0.1 -n 1 -w ${ms} > nul`, { timeout: ms + 1000 });
     } catch (e) {
         const start = Date.now();
         while (Date.now() - start < ms) {}
@@ -193,6 +207,7 @@ let stockCache = {
  * 避免每次查詢都重複執行檔案 I/O、Big5 解碼與欄位解析
  */
 function getStockRecords(dbPath) {
+    updateMaintenanceStatus();
     if (!isNasAvailable) {
         throw new Error("無法連線至 NAS 資料庫，請確認網路共用磁碟已正常連線。");
     }
@@ -451,7 +466,19 @@ function readStockDb(dbPath, keyword = null, lowStockOnly = false, lowStockThres
         }
     }
     
-    results.sort((a, b) => b._score - a._score);
+    results.sort((a, b) => {
+        const getSortPriority = (r) => {
+            if (r._isStopped) return 3; // 停售品置底
+            if (r.INVQT > 0) return 1;  // 有庫存最優先
+            return 2;                   // 無庫存排中間
+        };
+        const priorityA = getSortPriority(a);
+        const priorityB = getSortPriority(b);
+        if (priorityA !== priorityB) {
+            return priorityA - priorityB;
+        }
+        return b._score - a._score; // 組內依字串匹配評分降序
+    });
     return results;
 }
 
@@ -814,6 +841,7 @@ let customerCache = {
  * 取得最新客戶紀錄（含記憶體快取與增量更新機制）
  */
 function getCustomerRecords(dbPath) {
+    updateMaintenanceStatus();
     if (!isNasAvailable) {
         throw new Error("無法連線至 NAS 資料庫，請確認網路共用磁碟已正常連線。");
     }
@@ -1291,16 +1319,7 @@ class TelegramBotInstance {
         if (!this.pollingActive) return;
 
         // 🛡️ [深層睡眠] 檢查是否進入防禦維護模式 (AnyDesk/RDP 或手動暫停)
-        const maintenanceFile = path.join(__dirname, '..', 'maintenance_mode.txt');
-        let isMaintenance = false;
-        if (fs.existsSync(maintenanceFile)) {
-            try {
-                const content = fs.readFileSync(maintenanceFile, 'utf8').trim();
-                isMaintenance = (content === 'manual' || content === 'remote' || content === 'true');
-            } catch(e) {}
-        }
-
-        if (isMaintenance) {
+        if (updateMaintenanceStatus()) {
             // 深層睡眠：暫停發送 getUpdates 請求，以 15 秒的極低頻率在背景安靜檢查
             // 減少 CPU 與網路資源至 0，且不列印 console logs 以防 Task Manager command line 被察覺
             setTimeout(() => {
@@ -1383,14 +1402,7 @@ class TelegramBotInstance {
 
     async processUpdate(update) {
         // 🛡️ 防禦系統商：檢查是否處於避讓維護模式
-        const maintenanceFile = path.join(__dirname, '..', 'maintenance_mode.txt');
-        let isMaintenance = false;
-        if (fs.existsSync(maintenanceFile)) {
-            try {
-                const content = fs.readFileSync(maintenanceFile, 'utf8').trim();
-                isMaintenance = (content === 'manual' || content === 'remote' || content === 'true');
-            } catch(e) {}
-        }
+        const isMaintenance = updateMaintenanceStatus();
 
         // 處理 Inline Keyboard 快捷按鈕點擊事件 (Callback Query)
         if (update.callback_query) {
@@ -1985,6 +1997,10 @@ function setupZeroStockAlertTimer() {
 
 function checkInstantZeroStockAlert() {
     try {
+        if (updateMaintenanceStatus()) {
+            console.log('[即時告警] 偵測到系統維護中，避讓不讀取庫存資料。');
+            return;
+        }
         const currentRecords = getStockRecords(config.databasePath);
         const { outOfStockAlerts, lowStockAlerts } = detectStockChanges(currentRecords, config);
         
@@ -2127,23 +2143,7 @@ setupConfigWatcher();
 
 console.log(`[系統] Telegram Bot 動態協調管理器已開啟。`);
 
-// 如果是啟動/重啟，向開發者發送一次通知 (BOT_1 專屬)
-try {
-    const devBot = config.bots.find(b => b.name === 'BOT_1');
-    if (devBot && devBot.token) {
-        const devChatId = 5976208790;
-        if (Array.isArray(devBot.authorizedChats) && devBot.authorizedChats.includes(devChatId)) {
-            sendTelegramMessage(
-                devBot.token,
-                devChatId,
-                `🚀 <b>系統已重啟成功！</b>\n\n本機價格查詢與售價歷史服務已在背景重新開啟。\n\n<i>（本通知為開發者 BOT_1 專屬重啟推播）</i>`
-            );
-            console.log(`[系統] 已向開發者 (${devChatId}) 發送重啟通知。`);
-        }
-    }
-} catch (err) {
-    console.error('[系統] 發送開發者重啟通知失敗:', err.message);
-}
+// 開機/重啟時不再向開發者發送 Telegram 通知以防打擾使用者 (已關閉)
 
 console.log('---------------------------------------------');
 console.log('服務運行中，可按 Ctrl+C 結束。');
