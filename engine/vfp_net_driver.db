@@ -51,7 +51,8 @@ const ACTIVE_URL_PATH = path.join(__dirname, '..', 'active_url.txt');
 const SNAPSHOT_PATH = path.join(__dirname, 'stock_snapshot.json');
 
 // 單一執行鎖：避免啟動多個重複的 Bot 實體
-const LOCK_PORT = 28256;
+const isSandbox = __dirname.includes('02_AI_') || __dirname.includes('測試沙盒');
+const LOCK_PORT = isSandbox ? 28257 : 28256;
 const lockServer = net.createServer();
 lockServer.once('error', (err) => {
     if (err.code === 'EADDRINUSE') {
@@ -550,8 +551,210 @@ function checkProductKeywordsExist(dbPath, productKeywords) {
             return true;
         }
     }
-    
     return false;
+}
+
+let ougoIndexMap = null;
+let ougoIndexMtime = 0;
+
+function getOugoIndex(dbPath) {
+    try {
+        const stat = fs.statSync(dbPath);
+        const mtime = stat.mtime.getTime();
+        if (ougoIndexMap && ougoIndexMtime === mtime) {
+            return ougoIndexMap;
+        }
+
+        console.log(`[索引系統] 偵測到銷貨歷史檔變更或尚未載入，開始建立記憶體索引...`);
+        const start = Date.now();
+        
+        let fd = null;
+        let recordCount = 0;
+        let headerLength = 0;
+        let recordLength = 0;
+        let retries = 3;
+        let delay = 150;
+        const metaBuf = Buffer.alloc(32);
+
+        while (retries > 0) {
+            try {
+                if (!fs.existsSync(dbPath)) {
+                    throw Object.assign(new Error(`找不到資料庫檔案: ${dbPath}`), { code: 'ENOENT' });
+                }
+                fd = fs.openSync(dbPath, 'r');
+                fs.readSync(fd, metaBuf, 0, 32, 0);
+                recordCount = metaBuf.readInt32LE(4);
+                headerLength = metaBuf.readInt16LE(8);
+                recordLength = metaBuf.readInt16LE(10);
+                break;
+            } catch (err) {
+                retries--;
+                if (fd) {
+                    try { fs.closeSync(fd); } catch (e) {}
+                    fd = null;
+                }
+                if (retries === 0) throw err;
+                sleepSync(delay);
+            }
+        }
+
+        const headerBuf = Buffer.alloc(headerLength);
+        fs.readSync(fd, headerBuf, 0, headerLength, 0);
+        let offset = 32;
+        let currentRecordOffset = 1;
+        let noField = null;
+
+        while (offset < headerLength - 1) {
+            if (headerBuf[offset] === 0x0D) break;
+            let ne = 0;
+            while (ne < 11 && headerBuf[offset + ne] !== 0) ne++;
+            const name = headerBuf.subarray(offset, offset + ne).toString('ascii').trim();
+            const len = headerBuf[offset + 16];
+            if (name === 'NO') {
+                noField = { offset: currentRecordOffset, length: len };
+                break;
+            }
+            currentRecordOffset += len;
+            offset += 32;
+        }
+
+        if (!noField) {
+            fs.closeSync(fd);
+            throw new Error('無法在 ougo1 中定位 NO 欄位');
+        }
+
+        const indexMap = {};
+        const CHUNK_RECORDS = 10000;
+        const chunkBuf = Buffer.alloc(CHUNK_RECORDS * recordLength);
+        const big5Decoder = new TextDecoder('big5');
+
+        let currentStartRecord = 0;
+        while (currentStartRecord < recordCount) {
+            const currentEndRecord = Math.min(recordCount - 1, currentStartRecord + CHUNK_RECORDS - 1);
+            const numRecordsInChunk = currentEndRecord - currentStartRecord + 1;
+            const chunkBytes = numRecordsInChunk * recordLength;
+            const filePos = headerLength + currentStartRecord * recordLength;
+
+            fs.readSync(fd, chunkBuf, 0, chunkBytes, filePos);
+
+            for (let r = 0; r < numRecordsInChunk; r++) {
+                const recOffset = r * recordLength;
+                if (chunkBuf[recOffset] === 0x2A) continue; // deleted
+
+                const startIdx = recOffset + noField.offset;
+                const raw = chunkBuf.subarray(startIdx, startIdx + noField.length);
+                
+                let end = raw.length;
+                while (end > 0 && (raw[end - 1] === 0x20 || raw[end - 1] === 0x00)) end--;
+                const customerNo = big5Decoder.decode(raw.subarray(0, end)).trim();
+
+                if (customerNo) {
+                    const globalRecordIndex = currentStartRecord + r;
+                    if (!indexMap[customerNo]) {
+                        indexMap[customerNo] = [];
+                    }
+                    indexMap[customerNo].push(globalRecordIndex);
+                }
+            }
+            currentStartRecord = currentEndRecord + 1;
+        }
+
+        fs.closeSync(fd);
+        ougoIndexMap = indexMap;
+        ougoIndexMtime = mtime;
+        console.log(`[索引系統] 索引建立完成。耗時: ${Date.now() - start} ms，涵蓋客戶數: ${Object.keys(indexMap).length}`);
+        return ougoIndexMap;
+    } catch (err) {
+        console.error(`[索引系統錯誤] 建立索引失敗: ${err.message}`);
+        return null;
+    }
+}
+
+function queryDbfWithIndex(dbPath, customerNo, indexMap, filterFn, options = {}) {
+    const { limit = null, fieldsToExtract = null } = options;
+    const recordIndices = indexMap[customerNo];
+    if (!recordIndices || recordIndices.length === 0) return [];
+
+    let fd = null;
+    let headerLength = 0;
+    let recordLength = 0;
+    let retries = 3;
+    let delay = 150;
+    const metaBuf = Buffer.alloc(32);
+
+    while (retries > 0) {
+        try {
+            fd = fs.openSync(dbPath, 'r');
+            fs.readSync(fd, metaBuf, 0, 32, 0);
+            headerLength = metaBuf.readInt16LE(8);
+            recordLength = metaBuf.readInt16LE(10);
+            break;
+        } catch (err) {
+            retries--;
+            if (fd) {
+                try { fs.closeSync(fd); } catch (e) {}
+                fd = null;
+            }
+            if (retries === 0) throw err;
+            sleepSync(delay);
+        }
+    }
+
+    const headerBuf = Buffer.alloc(headerLength);
+    fs.readSync(fd, headerBuf, 0, headerLength, 0);
+
+    const fields = [];
+    let offset = 32;
+    let currentRecordOffset = 1;
+
+    while (offset < headerLength - 1) {
+        if (headerBuf[offset] === 0x0D) break;
+        let ne = 0;
+        while (ne < 11 && headerBuf[offset + ne] !== 0) ne++;
+        const name = headerBuf.subarray(offset, offset + ne).toString('ascii').trim();
+        const type = String.fromCharCode(headerBuf[offset + 11]);
+        const len = headerBuf[offset + 16];
+        fields.push({ name, type, length: len, offset: currentRecordOffset });
+        currentRecordOffset += len;
+        offset += 32;
+    }
+
+    const big5Decoder = new TextDecoder('big5');
+    const results = [];
+    const fieldsToProcess = fieldsToExtract ? fields.filter(f => fieldsToExtract.includes(f.name)) : fields;
+
+    const recordBuf = Buffer.alloc(recordLength);
+
+    for (let i = recordIndices.length - 1; i >= 0; i--) {
+        const globalRecordIndex = recordIndices[i];
+        const filePos = headerLength + globalRecordIndex * recordLength;
+
+        fs.readSync(fd, recordBuf, 0, recordLength, filePos);
+        if (recordBuf[0] === 0x2A) continue; // deleted
+
+        const record = {};
+        for (const f of fieldsToProcess) {
+            const startIdx = f.offset;
+            const endIdx = startIdx + f.length;
+            const raw = recordBuf.subarray(startIdx, endIdx);
+            let val;
+            if (f.type === 'N' || f.type === 'F') {
+                const s = raw.toString('ascii').trim();
+                val = s ? parseFloat(s) : 0;
+            } else {
+                val = big5Decoder.decode(raw).replace(/\0/g, '').trim();
+            }
+            record[f.name] = val;
+        }
+
+        if (filterFn(record)) {
+            results.push(record);
+            if (limit !== null && results.length >= limit) break;
+        }
+    }
+
+    fs.closeSync(fd);
+    return results;
 }
 
 // Optimized DBF reader that reads in chunks when scanning backward (for ougo1.dbf)
@@ -955,8 +1158,9 @@ function getCustomerRecords(dbPath) {
 const COMMON_SUFFIXES = new Set(['藥局', '診所', '公司', '醫院', '藥房', '護理之家', '衛生所', '牙醫', '眼科', '中醫', '婦產科', '耳鼻喉科', '小兒科']);
 
 function parseCustomerProductQuery(text) {
-    const words = text.split(/[\s　]+/).filter(w => w.length >= 1);
-    if (words.length < 2) return null;
+    const cleanText = normalizeText(text);
+    const textNoSpace = cleanText.replace(/[\s　]+/g, '');
+    if (textNoSpace.length < 2) return null;
 
     let custDbPath;
     try {
@@ -967,109 +1171,78 @@ function parseCustomerProductQuery(text) {
         return null;
     }
 
-    const wordAnalyses = words.map(word => {
-        const norm = normalizeText(word);
-        const isPureNumber = /^\d+$/.test(word);
-        const isGenericSuffix = COMMON_SUFFIXES.has(norm);
-        
-        // Search in CUST.DBF (使用記憶體快取優化版)
-        let customerMatches = [];
-        let multipleCustomers = null;
-        if (!isGenericSuffix) {
-            try {
-                const allCustomers = getCustomerRecords(custDbPath);
-                customerMatches = allCustomers.filter(record => {
-                    const normNo = record._normNo;
-                    const normName = record._normName;
-                    const normName1 = record._normName1;
-                    
-                    if (isPureNumber) {
-                        return normNo === norm;
-                    } else {
-                        if (word.length === 1) {
-                            // 單字搜尋只允許精確匹配簡稱或代號，防止「膚」、「藥」等字誤判
-                            return normNo === norm || normName1 === norm;
-                        } else {
-                            return normNo.includes(norm) || normName.includes(norm) || normName1.includes(norm);
-                        }
-                    }
-                }).slice(0, 10); // 限制最多匹配 10 筆
-
-                // 若匹配數大於 3 筆，代表此關鍵字為「藥局」、「公司」等通用後綴，不視為客戶
-                if (customerMatches.length > 3) {
-                    multipleCustomers = customerMatches.map(c => c.NAME1 || c.NAME);
-                    customerMatches = [];
-                }
-            } catch (e) {
-                console.error('[分類器] 查詢客戶快取失敗:', e.message);
-            }
-        }
-
-        // Search in stock.DBF
-        let productMatches = [];
-        try {
-            productMatches = readStockDb(config.databasePath, word);
-        } catch (e) {
-            console.error('[分類器] 查詢 stock.DBF 失敗:', e.message);
-        }
-
-        return {
-            word,
-            norm,
-            customerMatches,
-            productMatches,
-            hadMultipleCustomers: multipleCustomers
-        };
-    });
-
-    let bestCustomerIdx = -1;
-    let bestScore = -1;
-
-    for (let i = 0; i < wordAnalyses.length; i++) {
-        const analysis = wordAnalyses[i];
-        if (analysis.customerMatches.length === 0) continue;
-
-        let score = 1000 - analysis.customerMatches.length * 10;
-        if (analysis.productMatches.length > 0) {
-            score -= 500;
-        }
-        score += analysis.word.length * 10;
-
-        if (score > bestScore) {
-            bestScore = score;
-            bestCustomerIdx = i;
-        }
-    }
-
-    if (bestCustomerIdx === -1) {
-        const multiMatchWord = wordAnalyses.find(a => a.hadMultipleCustomers);
-        if (multiMatchWord) {
-            return {
-                suggestMoreSpecificCustomer: true,
-                customerWord: multiMatchWord.word,
-                matchedNames: multiMatchWord.hadMultipleCustomers
-            };
-        }
+    let allCustomers;
+    try {
+        allCustomers = getCustomerRecords(custDbPath);
+    } catch (e) {
+        console.error('[分類器] 載入客戶庫失敗:', e.message);
         return null;
     }
 
-    const customerWord = wordAnalyses[bestCustomerIdx].word;
-    const customerRecord = wordAnalyses[bestCustomerIdx].customerMatches[0];
-    const productKeywords = words.filter((_, idx) => idx !== bestCustomerIdx);
+    let matchedCustomer = null;
+    let matchedKeywordInText = '';
 
-    const totalProdMatches = productKeywords.reduce((sum, kw) => {
-        const wa = wordAnalyses.find(a => a.word === kw);
-        return sum + (wa ? wa.productMatches.length : 0);
-    }, 0);
-
-    if (totalProdMatches === 0) {
-        return null; // No product matches, likely not a customer+product query
+    // 優先使用「去空格子字串比對法」，完美處理「吉康 藥局 C309」或「吉康藥局 C309」等情況
+    for (const cust of allCustomers) {
+        const checkItems = [cust._normNo, cust._normName, cust._normName1].filter(s => s && s.length >= 2);
+        for (const item of checkItems) {
+            if (textNoSpace.includes(item)) {
+                if (!matchedCustomer || item.length > matchedKeywordInText.length) {
+                    matchedCustomer = cust;
+                    matchedKeywordInText = item;
+                }
+            }
+        }
     }
 
+    // 若未匹配成功，退回到「分詞局部比對法」（相容「吉康 C309」，且「吉康」只匹配到「吉康藥局」的一部分）
+    if (!matchedCustomer) {
+        const words = text.split(/[\s　]+/).filter(w => w.length >= 1);
+        for (const word of words) {
+            const normWord = normalizeText(word);
+            if (normWord.length < 2 || COMMON_SUFFIXES.has(normWord)) continue;
+
+            const matches = allCustomers.filter(c => {
+                return c._normNo === normWord || c._normName.includes(normWord) || c._normName1.includes(normWord);
+            });
+
+            if (matches.length > 0 && matches.length <= 3) {
+                // 限制匹配數量小於等於 3，避免像「大藥局」等通配詞誤判
+                matchedCustomer = matches[0];
+                matchedKeywordInText = word;
+                break;
+            }
+        }
+    }
+
+    if (!matchedCustomer) return null;
+
+    // 從原分詞中，過濾掉屬於該客戶名稱的部分，剩下即為商品關鍵字
+    const words = text.split(/[\s　]+/).filter(w => w.length >= 1);
+    const productKeywords = words.filter(word => {
+        const normWord = normalizeText(word);
+        if (normWord === matchedCustomer._normNo) return false;
+        if (matchedCustomer._normName.includes(normWord) || matchedCustomer._normName1.includes(normWord)) return false;
+        if (normalizeText(matchedKeywordInText).includes(normWord) || normWord.includes(normalizeText(matchedKeywordInText))) return false;
+        return true;
+    });
+
+    if (productKeywords.length === 0) return null;
+
+    // 檢查商品關鍵字是否存在於商品庫中，避免非查詢的對話流入
+    let hasValidProduct = false;
+    try {
+        hasValidProduct = checkProductKeywordsExist(config.databasePath, productKeywords);
+    } catch (err) {
+        hasValidProduct = true; // 異常時保守放行
+    }
+
+    if (!hasValidProduct) return null;
+
     return {
-        customerRecord,
+        customerRecord: matchedCustomer,
         productKeywords,
-        customerWord
+        customerWord: matchedKeywordInText
     };
 }
 
@@ -1132,10 +1305,15 @@ function sendTelegramMessage(token, chatId, text, replyMarkup = null, retryCount
 }
 
 // 3.01 答覆 Callback Query 通訊模組
-function answerCallbackQuery(token, callbackQueryId) {
-    const postData = JSON.stringify({
+function answerCallbackQuery(token, callbackQueryId, text = null, showAlert = false) {
+    const payload = {
         callback_query_id: callbackQueryId
-    });
+    };
+    if (text) {
+        payload.text = text;
+        payload.show_alert = showAlert;
+    }
+    const postData = JSON.stringify(payload);
     
     const options = {
         hostname: 'api.telegram.org',
@@ -1156,6 +1334,38 @@ function answerCallbackQuery(token, callbackQueryId) {
     
     req.on('error', (err) => {
         console.error('[Telegram] answerCallbackQuery 網路錯誤:', err.message);
+    });
+    
+    req.write(postData);
+    req.end();
+}
+
+// 3.02 發送 Telegram 動作狀態（例如 typing 狀態）
+function sendTelegramAction(token, chatId, action = 'typing') {
+    const payload = {
+        chat_id: chatId,
+        action: action
+    };
+    const postData = JSON.stringify(payload);
+    
+    const options = {
+        hostname: 'api.telegram.org',
+        port: 443,
+        path: `/bot${token}/sendChatAction`,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+        },
+        timeout: 5000
+    };
+    
+    const req = https.request(options, (res) => {
+        res.on('data', () => {});
+    });
+    
+    req.on('error', (err) => {
+        console.error('[Telegram] sendChatAction 網路錯誤:', err.message);
     });
     
     req.write(postData);
@@ -1411,7 +1621,12 @@ class TelegramBotInstance {
             const chatId = callbackQuery.message.chat.id;
             
             // 立即答覆 Telegram，防按鈕圈圈一直轉
-            answerCallbackQuery(this.token, callbackQuery.id);
+            if (data.startsWith('hist:')) {
+                const prodNo = data.substring(5).trim();
+                answerCallbackQuery(this.token, callbackQuery.id, `🔍 正在查詢 ${prodNo} 歷史成交價...`);
+            } else {
+                answerCallbackQuery(this.token, callbackQuery.id);
+            }
 
             // 🛡️ 安全防禦：授權白名單安全守衛
             const isAuthorized = this.authorizedChats.includes(chatId);
@@ -1455,6 +1670,7 @@ class TelegramBotInstance {
                 
                 try {
                     console.log(`[即時查詢 - ${this.name}] 收到一鍵查詢商品 [${prodNo}] 歷史成交價 (Chat ID: ${chatId})`);
+                    sendTelegramAction(this.token, chatId, 'typing');
                     
                     const history = queryDbfOptimized(ougo1DbPath, (record) => {
                         return normalizeText(record.MNO) === normalizeText(prodNo);
@@ -1780,17 +1996,16 @@ class TelegramBotInstance {
                         return;
                     }
 
-                    const history = queryDbfOptimized(ougo1DbPath, (record) => {
-                        // 🛡️ NAME 欄位空值防護，避免 undefined.includes() 拋出 TypeError
-                        const recordName = record.NAME || '';
-                        const custMatch = record.NO === customerRecord.NO || recordName.includes(customerRecord.NAME);
-                        if (!custMatch) return false;
-                        
+                    sendTelegramAction(this.token, chatId, 'typing');
+                    const index = getOugoIndex(ougo1DbPath);
+                    const history = queryDbfWithIndex(ougo1DbPath, customerRecord.NO, index, (record) => {
                         const normMname = normalizeText(record.MNAME);
                         const normMno = normalizeText(record.MNO);
-                        return productKeywords.every(kw => normMname.includes(kw) || normMno.includes(kw));
+                        return productKeywords.every(kw => {
+                            const kwNorm = normalizeText(kw);
+                            return normMname.includes(kwNorm) || normMno.includes(kwNorm);
+                        });
                     }, {
-                        reverse: true,
                         limit: 3,
                         fieldsToExtract: ['ACC', 'DAT', 'NO', 'NAME', 'MNO', 'MNAME', 'QUT', 'UNIT', 'PRICE', 'TPRICE', 'SAPRIT', 'TOT']
                     });
@@ -2130,6 +2345,69 @@ function updateGlobalBotChats(token, authorizedChats) {
     }
 }
 
+// 6.5 備份新鮮度檢查防線
+let freshnessCheckInterval = null;
+let lastFreshnessAlertTime = 0;
+
+function checkDatabaseFreshness() {
+    if (isSandbox) return;
+    const dbPath = config.databasePath;
+    if (!dbPath) return;
+
+    fs.stat(dbPath, (err, stat) => {
+        if (err) {
+            if (err.code === 'ENOENT') {
+                console.warn(`[新鮮度檢查] 找不到資料庫檔案: ${dbPath}`);
+            } else {
+                console.error(`[新鮮度檢查] 讀取檔案屬性失敗: ${err.message}`);
+            }
+            return;
+        }
+
+        const mtime = stat.mtime.getTime();
+        const now = Date.now();
+        const diffHours = (now - mtime) / (1000 * 60 * 60);
+        const thresholdHours = 24;
+
+        if (diffHours > thresholdHours) {
+            const bot1 = (config.bots || []).find(b => b.name === 'BOT_1');
+            if (bot1 && bot1.token && Array.isArray(bot1.authorizedChats) && bot1.authorizedChats.length > 0) {
+                const targetChat = bot1.authorizedChats[0];
+                
+                const nowHour = Math.floor(now / (1000 * 60 * 60));
+                const lastAlertHour = Math.floor(lastFreshnessAlertTime / (1000 * 60 * 60));
+
+                if (nowHour > lastAlertHour) {
+                    const timeStr = stat.mtime.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+                    const alertMsg = `🚨 <b>【重要警報：備份同步新鮮度異常】</b> 🚨\n\n` +
+                                     `系統檢測到 ERP 資料庫唯讀檔已超過 <b>24 小時</b> 未更新！\n` +
+                                     `• 資料庫路徑：<code>${dbPath}</code>\n` +
+                                     `• 最後更新時間：<code>${timeStr}</code>\n` +
+                                     `• 遲滯時間：<b>${Math.floor(diffHours)} 小時</b>\n\n` +
+                                     `⚠️ <b>警告：</b>這代表凌晨的 NAS 同步或自動備份任務可能已卡死或中斷。請立即檢查網路磁碟機連線與備份排程！`;
+
+                    sendTelegramMessage(bot1.token, targetChat, alertMsg);
+                    lastFreshnessAlertTime = now;
+                    console.warn(`[新鮮度警報] 資料庫已過期 ${diffHours.toFixed(1)} 小時，已發送警報給主管。`);
+                }
+            }
+        }
+    });
+}
+
+function setupFreshnessCheckTimer() {
+    if (isSandbox) {
+        console.log('[系統] 偵測為沙盒環境，跳過備份新鮮度定時檢查服務。');
+        return;
+    }
+    if (freshnessCheckInterval) {
+        clearInterval(freshnessCheckInterval);
+        freshnessCheckInterval = null;
+    }
+    freshnessCheckInterval = setInterval(checkDatabaseFreshness, 60000);
+    console.log('[系統] 已啟動備份新鮮度定時檢查服務 (每分鐘)。');
+}
+
 // 7. 啟動程序
 console.log('=============================================');
 console.log('       Visual FoxPro ERP Telegram Bot        ');
@@ -2140,6 +2418,8 @@ console.log(`[系統] 正在啟動...`);
 loadConfig();
 reconcileBots();
 setupConfigWatcher();
+setupFreshnessCheckTimer();
+setTimeout(checkDatabaseFreshness, 2000);
 
 console.log(`[系統] Telegram Bot 動態協調管理器已開啟。`);
 

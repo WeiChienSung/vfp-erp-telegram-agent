@@ -13,10 +13,10 @@ foreach ($port in $ports) {
     }
 }
 
-# 2.1 Kill any running vfp_net_driver.db processes
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*vfp_net_driver.db*" -or $_.CommandLine -like "*telegram_bot.js*" } | ForEach-Object {
+# 2.1 Kill any running vfp_net_driver.db processes belonging to production
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -like "*vfp_net_driver.db*" -or $_.CommandLine -like "*telegram_bot.js*") -and $_.CommandLine -like "*03_AI_*" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Output "Stopped db/bot process $($_.ProcessId)"
+    Write-Output "Stopped production db/bot process $($_.ProcessId)"
 }
 
 Start-Sleep -Seconds 2
