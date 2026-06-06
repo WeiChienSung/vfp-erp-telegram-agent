@@ -566,6 +566,7 @@ function getOugoIndex(dbPath) {
         }
 
         console.log(`[索引系統] 偵測到銷貨歷史檔變更或尚未載入，開始建立記憶體索引...`);
+        ougoIndexMap = null; // 🛡️ 提前釋放舊索引記憶體，優化垃圾回收 (GC)
         const start = Date.now();
         
         let fd = null;
@@ -725,7 +726,11 @@ function queryDbfWithIndex(dbPath, customerNo, indexMap, filterFn, options = {})
 
     const recordBuf = Buffer.alloc(recordLength);
 
-    for (let i = recordIndices.length - 1; i >= 0; i--) {
+    // 🛡️ 防禦性設計：設定最大檢索深度限制為 2000 筆，防止極端情況卡住執行緒
+    const maxSearchDepth = 2000;
+    const startIndex = Math.max(0, recordIndices.length - maxSearchDepth);
+
+    for (let i = recordIndices.length - 1; i >= startIndex; i--) {
         const globalRecordIndex = recordIndices[i];
         const filePos = headerLength + globalRecordIndex * recordLength;
 

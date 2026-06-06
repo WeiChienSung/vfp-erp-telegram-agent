@@ -2,6 +2,7 @@
 /config.json
 /maintenance_mode.txt
 /active_url.txt
+/active_token.txt
 
 # 排除執行檔與大體積用戶端安裝檔
 /bin/vfp_sync_host.exe
